@@ -1,0 +1,394 @@
+{
+  "preset": "dnd2024",
+  "nameKey": "character_name",
+  "subtitleKeys": [
+    "class",
+    "level"
+  ],
+  "imageKey": "cover",
+  "fields": [
+    {
+      "label": "HP",
+      "display": "bar",
+      "source": "hp_current",
+      "max": "hp_max",
+      "temp": "temp_hp"
+    },
+    {
+      "label": "AC",
+      "display": "shield",
+      "source": "armor_class"
+    },
+    {
+      "label": "Perception",
+      "display": "text",
+      "source": "$passive:Passive Perception",
+      "group": "Passive"
+    },
+    {
+      "label": "Insight",
+      "display": "text",
+      "source": "$passive:Passive Insight",
+      "group": "Passive"
+    },
+    {
+      "label": "Investigation",
+      "display": "text",
+      "source": "$passive:Passive Investigation",
+      "group": "Passive"
+    },
+    {
+      "label": "Save DC",
+      "display": "text",
+      "source": "$spelldc",
+      "group": "Spellcasting"
+    },
+    {
+      "label": "Attack",
+      "display": "text",
+      "source": "$spellattack",
+      "group": "Spellcasting"
+    },
+    {
+      "label": "Conditions",
+      "display": "tags",
+      "source": "$conditions"
+    },
+    {
+      "label": "Slots",
+      "display": "pips",
+      "source": "$slots"
+    }
+  ],
+  "categories": [
+    {
+      "name": "Spells",
+      "folders": [
+        "Dungeons & Dragons/03. Kniha kouzel"
+      ],
+      "tags": [
+        "Spell"
+      ]
+    },
+    {
+      "name": "Monsters",
+      "folders": [
+        "Dungeons & Dragons/04. Kniha příšer"
+      ],
+      "tags": [
+        "Monster"
+      ]
+    },
+    {
+      "name": "Items",
+      "folders": [
+        "Dungeons & Dragons/06. Tradice, Frakce & Předměty/Předměty"
+      ],
+      "tags": [
+        "Item"
+      ]
+    },
+    {
+      "name": "NPCs",
+      "folders": [
+        "Dungeons & Dragons/01. Kampaň/1. Master Plan/NPC"
+      ],
+      "tags": [
+        "NPC"
+      ]
+    },
+    {
+      "name": "Rules",
+      "folders": [
+        "Dungeons & Dragons/02. Pravidla"
+      ],
+      "tags": [
+        "Rule"
+      ]
+    },
+    {
+      "name": "Places",
+      "folders": [
+        "Dungeons & Dragons/05. Kosmologie"
+      ],
+      "tags": [
+        "Location"
+      ]
+    }
+  ],
+  "party": {
+    "mode": "sheetGroup",
+    "value": "Anauroch"
+  },
+  "useSheet": true,
+  "compactParty": false,
+  "fullText": false,
+  "resultLimit": 30,
+  "screens": [
+    {
+      "id": "3fn5k4eq",
+      "name": "Main",
+      "tiles": [
+        {
+          "id": "3kk191bg",
+          "type": "party",
+          "x": 0,
+          "y": 0,
+          "w": 590,
+          "h": 640,
+          "cw": 220,
+          "members": [
+            "Dungeons & Dragons/01. Kampaň/2. Hráči/Dobrodruzi/Roland.md",
+            "Dungeons & Dragons/01. Kampaň/2. Hráči/Dobrodruzi/Garmus Blackhammer.md",
+            "Dungeons & Dragons/01. Kampaň/2. Hráči/Dobrodruzi/Edd von Grundfell.md",
+            "Dungeons & Dragons/01. Kampaň/2. Hráči/Dobrodruzi/Gor'Shak Akannathi.md",
+            "Dungeons & Dragons/01. Kampaň/2. Hráči/Dobrodruzi/Luna Theren.md",
+            "Dungeons & Dragons/01. Kampaň/2. Hráči/Dobrodruzi/Sigmar Orberwell.md"
+          ],
+          "collapsed": false
+        },
+        {
+          "id": "o18ysr0s",
+          "type": "note",
+          "path": "Dungeons & Dragons/05. Kosmologie/Vnitřní pláně/Materiální pláň/Toril/Faerûn/Sword Coast/Waterdeep/Waterdeep.md",
+          "x": 600,
+          "y": 1050,
+          "w": 710,
+          "h": 420,
+          "expanded": true,
+          "cw": 180
+        },
+        {
+          "id": "v1bzmy42",
+          "x": 600,
+          "y": 0,
+          "w": 710,
+          "h": 1040,
+          "expanded": true,
+          "type": "map",
+          "path": "Dungeons & Dragons/05. Kosmologie/Vnitřní pláně/Materiální pláň/Toril/Faerûn/Sword Coast/Waterdeep/Waterdeep.md",
+          "mapIndex": 1,
+          "mapId": "map-161",
+          "mapLine": 184,
+          "title": "Waterdeep – map",
+          "cw": 270
+        },
+        {
+          "id": "e5ddlunl",
+          "x": 0,
+          "y": 650,
+          "w": 590,
+          "h": 390,
+          "cw": 240,
+          "expanded": false,
+          "type": "dice",
+          "collapsed": false
+        },
+        {
+          "id": "ucmx3as8",
+          "x": 0,
+          "y": 1050,
+          "w": 590,
+          "h": 420,
+          "cw": 220,
+          "expanded": true,
+          "type": "note",
+          "path": "Dungeons & Dragons/02. Pravidla/Oficiální pravidla D&D/Akce (Actions)/Uchopit (Grapple).md"
+        },
+        {
+          "id": "o588evr7",
+          "x": 1320,
+          "y": 0,
+          "w": 340,
+          "h": 320,
+          "cw": 240,
+          "expanded": false,
+          "type": "sticky",
+          "text": "When the GM smiles....\n\n\n... its already too late",
+          "color": "yellow",
+          "textSize": "m"
+        },
+        {
+          "id": "28kyhuzh",
+          "x": 1320,
+          "y": 330,
+          "w": 449,
+          "h": 710,
+          "cw": 240,
+          "expanded": false,
+          "type": "checklist",
+          "items": [
+            {
+              "id": "bxrj9hbu",
+              "text": "Introduction",
+              "done": false
+            },
+            {
+              "id": "wqq2pbz8",
+              "text": "Screen tabs",
+              "done": false
+            },
+            {
+              "id": "4hvmrobm",
+              "text": "- Screen tabs: export - import",
+              "done": false
+            },
+            {
+              "id": "watl46l2",
+              "text": "Search bar",
+              "done": false
+            },
+            {
+              "id": "3cui5tvn",
+              "text": "Add: party",
+              "done": false
+            },
+            {
+              "id": "2qov5515",
+              "text": "Add: session notes",
+              "done": false
+            },
+            {
+              "id": "k526dalq",
+              "text": "Add: combat",
+              "done": false
+            },
+            {
+              "id": "dzaxkm4t",
+              "text": "- Initiative tracker: first glance & top bar",
+              "done": false
+            },
+            {
+              "id": "3qfk712w",
+              "text": "- Initiative tracker: Concentration & conditions",
+              "done": false
+            },
+            {
+              "id": "xw0lo8uw",
+              "text": "Add: dice tray",
+              "done": false
+            },
+            {
+              "id": "ahdyit0d",
+              "text": "- Dice tray : 3D dice or cards",
+              "done": false
+            },
+            {
+              "id": "ri3ll8f9",
+              "text": "- Dice tray: Char. sheet & Initiative dice integration",
+              "done": false
+            },
+            {
+              "id": "qgdcn837",
+              "text": "Add: sticky note",
+              "done": false
+            },
+            {
+              "id": "jrix02oc",
+              "text": "- Sticky note: Change colors, text",
+              "done": false
+            },
+            {
+              "id": "4f04csub",
+              "text": "Add: checklist",
+              "done": false
+            },
+            {
+              "id": "5jemx23n",
+              "text": "- Checklist: options",
+              "done": false
+            },
+            {
+              "id": "y8avtu0o",
+              "text": "Lock screen",
+              "done": false
+            },
+            {
+              "id": "8pfzl4x8",
+              "text": "Pin Notes from Vault",
+              "done": false
+            },
+            {
+              "id": "lpixo7ct",
+              "text": "Pin Maps from Notes",
+              "done": false
+            }
+          ]
+        }
+      ],
+      "locked": false
+    },
+    {
+      "id": "1v908rdp",
+      "name": "Screen 2",
+      "tiles": []
+    }
+  ],
+  "activeScreen": "3fn5k4eq",
+  "openIn": "main",
+  "combat": {
+    "folder": "Encounters"
+  },
+  "dice": {
+    "anim3d": true,
+    "catchDiceRoller": true,
+    "initiativeInTray": true,
+    "history": [
+      {
+        "formula": "1d20+7",
+        "label": "Longsword",
+        "total": 25
+      },
+      {
+        "formula": "1d20+7",
+        "label": "Longsword",
+        "total": 16
+      },
+      {
+        "formula": "1d20+7",
+        "label": "Longsword",
+        "total": 22
+      },
+      {
+        "formula": "1d8+1",
+        "label": "Light Crossbow",
+        "total": 2
+      },
+      {
+        "formula": "1d20+4",
+        "label": "Light Crossbow",
+        "total": 22
+      },
+      {
+        "formula": "3d8 + 5",
+        "label": "Tree Club",
+        "total": 16
+      },
+      {
+        "formula": "3d8 + 5",
+        "label": "Tree Club",
+        "total": 20
+      },
+      {
+        "formula": "2d4",
+        "label": "Healing Word",
+        "total": 7
+      }
+    ]
+  },
+  "showCombatBar": true,
+  "concentration": true,
+  "templates": [],
+  "openOnStart": false,
+  "diary": {
+    "folder": "Dungeons & Dragons/01. Kampaň/1. Master Plan/Deník",
+    "pattern": "Sezení {{number}} - {{title}}",
+    "pad": 2,
+    "dateFormat": "DD.MM.YYYY",
+    "templatePath": "",
+    "templateText": "---\ntype: notes\nlocations:\ntags:\n - diary\ndate: \"{{date}}\"\n---\n![[session.png|banner]]\n###### {{title}}\n<span class=\"sub2\">:FasSun: DAY 00&nbsp; | &nbsp; :FasTags: `VIEW[{tags}][text]`</span>\n___\n\n> [!quote|no-t] SUMMARY\n> \n",
+    "draft": "",
+    "current": "Dungeons & Dragons/01. Kampaň/1. Master Plan/Deník/Sezení 51 - test 2.md"
+  },
+  "fieldsVersion": 2
+}

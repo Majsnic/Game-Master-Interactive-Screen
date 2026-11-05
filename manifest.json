@@ -1,0 +1,9 @@
+{
+  "id": "game-master-screen",
+  "name": "Game Master Interactive Screen",
+  "version": "0.9.1",
+  "minAppVersion": "1.4.0",
+  "description": "A system-agnostic GM screen: tabbed screens with notes, sections, maps, live party stats and a session diary you place anywhere. Works with One DnD Character Sheet and TTRPG Tools - Maps.",
+  "author": "Majsnic",
+  "isDesktopOnly": false
+}
