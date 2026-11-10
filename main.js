@@ -39,10 +39,12 @@ const {
   debounce,
   getAllTags,
 } = obsidian;
+/** Obsidian's HTML sanitizer (falls back to plain text on very old versions). */
+const sanitizeHTMLToDom = obsidian.sanitizeHTMLToDom || ((html) => { const d = document.createDocumentFragment(); d.append(String(html).replace(/<[^>]+>/g, "")); return d; });
 
 const VIEW_TYPE = "game-master-screen-view";
 const SHEET_ID = "onednd-character-sheet";
-const DEFAULT_SHEET_DATA_FOLDER = "Kompendium/Character Sheet Data";
+const DEFAULT_SHEET_DATA_FOLDER = "Compendium/Character Sheet Data"; // only if the sheet doesn't report its own dataFolder
 
 /* ------------------------------------------------------------------ */
 /* Presets                                                             */
@@ -132,8 +134,9 @@ const DEFAULT_SETTINGS = {
   openIn: "main",
   combat: { folder: "Encounters" },
   dice: { anim3d: true, catchDiceRoller: true, initiativeInTray: true, history: [] },
+  sound: { volume: 80, fade: 1200 },
+  session: { minutes: 240, warn: 30, chime: true, startedAt: null, elapsed: 0, warned: false, over: false },
   showCombatBar: true,
-  concentration: true,
   templates: [],
   openOnStart: false,
   diary: {
@@ -580,10 +583,13 @@ const TILE_SIZES = {
   dice: { w: 420, h: 400 },
   sticky: { w: 240, h: 230 },
   checklist: { w: 270, h: 320 },
+  sound: { w: 360, h: 300 },
+  clocks: { w: 400, h: 480 },
+  tables: { w: 460, h: 520 },
   diary: { w: 440, h: 440 },
 };
-const TILE_ICONS = { note: "file-text", section: "heading", map: "map", party: "users", diary: "notebook-pen", combat: "swords", dice: "dices", sticky: "sticky-note", checklist: "list-checks" };
-const ALWAYS_OPEN = ["party", "diary", "combat", "dice", "sticky", "checklist"];
+const TILE_ICONS = { note: "file-text", section: "heading", map: "map", party: "users", diary: "notebook-pen", combat: "swords", dice: "dices", sticky: "sticky-note", checklist: "list-checks", sound: "audio-lines", clocks: "hourglass", tables: "dices" };
+const ALWAYS_OPEN = ["party", "diary", "combat", "dice", "sticky", "checklist", "sound", "clocks", "tables"];
 const STICKY_COLORS = { yellow: "Yellow", pink: "Pink", blue: "Blue", green: "Green", orange: "Orange" };
 const STICKY_SIZES = { s: ["Small", 0.8], m: ["Medium", 1], l: ["Large", 1.3], xl: ["Extra large", 1.7] }; // shown open unless shrunk
 
@@ -893,10 +899,6 @@ function snapResize(box, others, th = 12, gap = GRID) {
   }
   return { w: bw ? bw.v : box.w, h: bh ? bh.v : box.h, snapped: !!(bw || bh) };
 }
-
-const isConcentration = (c) => /concentrat|soustřed/i.test(String((c && c.name) || c || ""));
-/** D&D: concentration save DC after taking damage. */
-const concentrationDC = (damage) => Math.min(30, Math.max(10, Math.floor(damage / 2)));
 
 /** A screen as a shareable JSON object (tile ids dropped). */
 function screenToJson(sc) {
@@ -1421,14 +1423,29 @@ function rollWhat(r) {
 }
 
 /**
+ * A spell note's "Damage / Effect" (e.g. "2d8 Healing + spellcasting ability modifier",
+ * "1d10 Force") → { kind: "Healing" | "Damage", damageType }. One DnD Character Sheet
+ * spell rows show only the dice since sheet 1.7, so the type has to come from the note.
+ */
+function spellEffectKind(effect) {
+  const eff = String(effect === undefined || effect === null ? "" : effect).trim();
+  if (!eff || !/\d+d\d+/i.test(eff)) return null;
+  if (/heal|léč|regain/i.test(eff)) return { kind: "Healing", damageType: null };
+  const rest = eff.replace(/^\s*(?:\d+d\d+)(?:\s*[+-]\s*(?:\d+d\d+|\d+))*\s*/i, "").split(/\s*[+(,;]\s*|\s+-\s+/)[0].trim();
+  const type = rest.replace(/\s+damage$/i, "").trim();
+  return { kind: "Damage", damageType: type && type.length < 25 && /^[A-Za-zÀ-ž ]+$/.test(type) ? type : null };
+}
+
+/**
  * Who rolled and what for, read from around a clicked Dice Roller button:
  * the character sheet's Actions/Spells rows (action name, hit cell or
  * damage cell, damage type) or a statblock action. `noteOf(el)` finds the
  * note the button sits in. Returns { who, whoPath, action, kind, damageType }.
  */
+const DAMAGE_TYPE_RE = /^(acid|bludgeoning|cold|fire|force|lightning|necrotic|piercing|poison|psychic|radiant|slashing|thunder|healing|kyselin|drtiv|chlad|oheň|ohe[nň]|síl|blesk|nekrot|bodn|jed|psych|zář|seč|hrom|léč)/i;
 function rollContext(el, noteOf) {
   const clean = (x) => String(x || "").replace(/\s+/g, " ").replace(/[.:]\s*$/, "").trim();
-  const ctx = { who: null, whoPath: null, action: null, kind: null, damageType: null };
+  const ctx = { who: null, whoPath: null, action: null, kind: null, damageType: null, link: null };
   const formula = String(el.getAttribute("data-dice") || "").toLowerCase();
   const isD20 = /(^|[^\d])1?d20/.test(formula);
   // Character sheet rows: name · range · hit · damage (+ type)
@@ -1441,10 +1458,14 @@ function rollContext(el, noteOf) {
       const idx = cells.indexOf(cell);
       const nameEl = row.querySelector(".action-name") || row.querySelector("a.internal-link") || row.firstElementChild;
       if (nameEl && !nameEl.contains(el)) ctx.action = clean(nameEl.textContent).replace(/\s*↑$/, "");
+      const link = row.querySelector(".action-name a.internal-link, a.internal-link");
+      if (link && !link.contains(el)) ctx.link = link.getAttribute("data-href") || link.getAttribute("href") || null;
       const own = clean((cell.textContent || "").replace(el.textContent || "", ""));
       if (idx === 0 && isD20) ctx.kind = "Attack";
       else {
-        const types = Array.from(row.querySelectorAll(".action-stat > b")).map((b) => clean(b.textContent)).filter(Boolean);
+        // An old-style separate "Type" column, if there is one (sheet 1.8 dropped it; the
+        // range cell is also a <b>, so only accept real damage-type words from it)
+        const types = Array.from(row.querySelectorAll(".action-stat > b")).map((b) => clean(b.textContent)).filter((x) => DAMAGE_TYPE_RE.test(x));
         ctx.damageType = own || (types.length ? types[types.length - 1] : null);
         ctx.kind = /heal|léč/i.test(ctx.damageType || "") ? "Healing" : isD20 ? "Roll" : "Damage";
         if (ctx.kind === "Healing") ctx.damageType = null;
@@ -1638,29 +1659,17 @@ class RollCards {
     arm();
     return card;
   }
-  /** "Echo is concentrating – DC 12" with a button to roll the save. */
-  showConcentration({ name, damage, dc, mod, roll }) {
+  /** A plain notice card (session reminder, timer done). tone: "warn" | "over" | "". */
+  showMessage({ title, text, tone }) {
     const stack = this.ensure();
-    const card = stack.createDiv({ cls: "gms-roll-card is-conc" });
+    const card = stack.createDiv({ cls: `gms-roll-card is-message${tone ? ` is-${tone}` : ""}` });
     const top = card.createDiv({ cls: "gms-roll-card-top" });
-    top.createDiv({ cls: "gms-roll-card-label", text: name });
-    top.createDiv({ cls: "gms-roll-card-flag", text: "Concentration" });
-    card.createDiv({ cls: "gms-roll-card-total", text: `DC ${dc}` });
-    card.createDiv({ cls: "gms-roll-card-detail", text: `Took ${damage} damage · Constitution save` });
-    const b = card.createEl("button", { cls: "gms-roll-card-apply mod-cta", text: `Roll CON save (${mod >= 0 ? "+" : ""}${mod})` });
-    b.onclick = (e) => {
-      e.stopPropagation();
-      card.remove();
-      roll();
-    };
-    while (stack.childElementCount > 3) stack.firstElementChild.remove();
-    let timer = 0;
-    const arm = () => (timer = window.setTimeout(() => card.addClass("is-leaving"), 30000));
-    card.addEventListener("mouseenter", () => window.clearTimeout(timer));
-    card.addEventListener("mouseleave", arm);
+    top.createDiv({ cls: "gms-roll-card-label", text: title });
+    card.createDiv({ cls: "gms-roll-card-msg", text });
+    while (stack.childElementCount > 4) stack.firstElementChild.remove();
     card.addEventListener("click", () => card.remove());
+    window.setTimeout(() => card.addClass("is-leaving"), 60000);
     card.addEventListener("transitionend", () => { if (card.hasClass("is-leaving")) card.remove(); });
-    arm();
     return card;
   }
   /** One card for a batch (e.g. initiative for the whole fight): rows of { label, total, detail, crit }. */
@@ -1719,6 +1728,40 @@ class TextPrompt extends Modal {
     setTimeout(() => { input.focus(); input.select(); }, 0);
   }
   onClose() { this.contentEl.empty(); }
+}
+
+class TextAreaPrompt extends Modal {
+  constructor(app, title, value, onSubmit, help) {
+    super(app);
+    this.t = title;
+    this.value = value || "";
+    this.onSubmit = onSubmit;
+    this.help = help;
+  }
+  onOpen() {
+    this.titleEl.setText(this.t);
+    if (this.help) this.contentEl.createDiv({ cls: "setting-item-description", text: this.help });
+    const ta = this.contentEl.createEl("textarea", { cls: "gms-json-box", attr: { spellcheck: "false" } });
+    ta.value = this.value;
+    const row = this.contentEl.createDiv({ cls: "modal-button-container" });
+    row.createEl("button", { text: "Save", cls: "mod-cta" }).onclick = () => { this.close(); this.onSubmit(ta.value); };
+    row.createEl("button", { text: "Cancel" }).onclick = () => this.close();
+    setTimeout(() => ta.focus(), 0);
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+class ListPicker extends FuzzySuggestModal {
+  constructor(app, items, text, onPick, placeholder) {
+    super(app);
+    this.items = items;
+    this.text = text;
+    this.onPick = onPick;
+    this.setPlaceholder(placeholder || "");
+  }
+  getItems() { return this.items; }
+  getItemText(it) { return this.text(it); }
+  onChooseItem(it) { this.onPick(it); }
 }
 
 class ConfirmPrompt extends Modal {
@@ -1781,6 +1824,828 @@ class NewSessionModal extends Modal {
     row.createEl("button", { text: "Cancel" }).onclick = () => this.close();
     titleInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
     setTimeout(() => titleInput.focus(), 0);
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+/* ================= Clocks (same text format as the Tabletop Clocks plugin) ================= */
+
+const CK_COLORS = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink"];
+const CK_FRAC = /(\d+)\s*\/\s*(\d+)/g;
+const CK_VS = /\s+vs\.?\s+/i;
+const CK_HEAD = /^#{1,6}\s+(.*)$/;
+const CK_LINK = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/;
+const CK_T = "\\d+:\\d{2}(?::\\d{2})?";
+const CK_SW = new RegExp(`^(.+?):\\s*(${CK_T})(?:\\s+of\\s+(${CK_T}))?$`, "i");
+const CK_CT = /^(.+?):\s*([-−]?\d+)(?:\s+of\s+(\d+))?$/i;
+const CK_FENCE = /^((?:\s*>)*\s*)(`{3,}|~{3,})\s*clocks\b/;
+const ckClamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function ckLastFrac(str) {
+  let m = null;
+  for (const x of str.matchAll(CK_FRAC)) m = x;
+  return m;
+}
+function ckName(str) {
+  let name = str;
+  let link;
+  const m = CK_LINK.exec(name);
+  if (m) {
+    link = m[1].trim();
+    name = name.replace(m[0], m[2] ? m[2].trim() : link);
+  }
+  return { name: name.replace(/\s+/g, " ").trim(), link };
+}
+function ckColorTail(str) {
+  const m = /^(.*?)(\s+(\S+))?\s*$/.exec(str);
+  const c = m[3] && m[3].toLowerCase();
+  return m[1] && c && CK_COLORS.includes(c) ? { rest: m[1], color: c, tail: m[2] } : { rest: str.trimEnd(), tail: "" };
+}
+const ckSecs = (str) => str.split(":").reduce((a, x) => a * 60 + parseInt(x, 10), 0);
+function ckTime(sec) {
+  const i = Math.max(0, Math.floor(sec));
+  const h = Math.floor(i / 3600);
+  const m = Math.floor((i % 3600) / 60);
+  const p = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${p(m)}:${p(i % 60)}` : `${m}:${p(i % 60)}`;
+}
+/** A counter ("Torches: 6 of 10") or stopwatch ("Ritual: 0:00 of 10:00") line. */
+function ckLine(line) {
+  const { rest, color, tail } = ckColorTail(line.trim());
+  let m = CK_SW.exec(rest);
+  if (m) {
+    const n = ckName(m[1]);
+    if (!n.name) return null;
+    const sw = { ...n, seconds: ckSecs(m[2]) };
+    if (m[3]) sw.limit = ckSecs(m[3]);
+    if (color) sw.color = color;
+    return { head: m[1], tail, stopwatch: sw };
+  }
+  m = CK_CT.exec(rest);
+  if (m) {
+    const n = ckName(m[1]);
+    if (!n.name) return null;
+    const c = { ...n, value: parseInt(m[2].replace("−", "-"), 10) };
+    if (m[3]) c.max = parseInt(m[3], 10);
+    if (color) c.color = color;
+    return { head: m[1], tail, counter: c };
+  }
+  return null;
+}
+/** One progress clock: "Alarm 2/6 red". */
+function ckClock(str, def, part = 0) {
+  let t = str.trim();
+  if (!t) return null;
+  let color;
+  const w = t.split(/\s+/);
+  const last = w[w.length - 1].toLowerCase();
+  if (w.length > 1 && CK_COLORS.includes(last)) {
+    color = last;
+    t = w.slice(0, -1).join(" ");
+  }
+  const f = ckLastFrac(t);
+  let size = def;
+  let filled = 0;
+  if (f) {
+    size = ckClamp(parseInt(f[2], 10), 2, 12);
+    filled = ckClamp(parseInt(f[1], 10), 0, size);
+    t = (t.slice(0, f.index) + t.slice(f.index + f[0].length)).trim();
+  }
+  let link;
+  const l = CK_LINK.exec(t);
+  if (l) {
+    link = l[1].trim();
+    t = t.replace(l[0], l[2] ? l[2].trim() : link);
+  }
+  const name = t.replace(/\s+/g, " ").replace(/[:\-–—]\s*$/, "").trim();
+  return name ? { name, link, filled, size, color, part, written: !!f } : null;
+}
+function parseClocks(text, def = 4) {
+  const out = [];
+  String(text || "").split("\n").forEach((raw, i) => {
+    const str = raw.trim();
+    if (!str) return;
+    const h = CK_HEAD.exec(str);
+    if (h) return out.push({ kind: "heading", index: i, text: h[1].trim() });
+    const l = ckLine(str);
+    if (l && l.counter) return out.push({ kind: "counter", index: i, counter: l.counter });
+    if (l && l.stopwatch) return out.push({ kind: "stopwatch", index: i, stopwatch: l.stopwatch });
+    const cl = str.split(CK_VS).slice(0, 2).map((x, k) => ckClock(x, def, k)).filter(Boolean);
+    if (cl.length) out.push({ kind: "clocks", index: i, clocks: cl });
+  });
+  return out;
+}
+/** New value for a counter (number) or stopwatch (seconds) on line `index`. */
+function ckSetValue(text, index, v) {
+  const lines = text.split("\n");
+  const raw = lines[index];
+  const l = raw === undefined ? null : ckLine(raw);
+  if (!l) return text;
+  const ind = /^\s*/.exec(raw)[0];
+  const val = l.counter
+    ? `${v}${l.counter.max !== undefined ? ` of ${l.counter.max}` : ""}`
+    : `${ckTime(v)}${l.stopwatch.limit !== undefined ? ` of ${ckTime(l.stopwatch.limit)}` : ""}`;
+  lines[index] = `${ind}${l.head.trim()}: ${val}${l.tail}`;
+  return lines.join("\n");
+}
+/** Fill `n` segments of clock `part` (0, or 1 for the right side of "A vs B") on line `index`. */
+function ckSetFill(text, index, part, n, def) {
+  const lines = text.split("\n");
+  const raw = lines[index];
+  if (raw === undefined) return text;
+  const ind = /^\s*/.exec(raw)[0];
+  const parts = raw.trim().split(CK_VS);
+  const seps = raw.trim().match(new RegExp(CK_VS.source, "gi")) || [];
+  const p = parts[part];
+  if (p === undefined) return text;
+  const c = ckClock(p, def, part);
+  if (!c) return text;
+  const v = ckClamp(n, 0, c.size);
+  const f = ckLastFrac(p);
+  if (f) parts[part] = p.slice(0, f.index) + `${v}/${c.size}` + p.slice(f.index + f[0].length);
+  else {
+    const m = /^(.*?)(\s+(?:red|orange|yellow|green|cyan|blue|purple|pink))?\s*$/i.exec(p);
+    parts[part] = `${m[1]} ${v}/${c.size}${m[2] || ""}`;
+  }
+  lines[index] = ind + parts.map((x, k) => (k ? seps[k - 1] || " vs " : "") + x).join("");
+  return lines.join("\n");
+}
+/** Append what was typed in the add box (several separated by ; or new lines). */
+function ckAdd(text, input, def) {
+  const lines = input.split(/\n|;/).map((x) => x.trim()).filter(Boolean)
+    .map((x) => (ckLine(x) ? x : x.split(CK_VS).map((p) => { const c = ckClock(p, def); return c && !c.written ? ckSetFill(p, 0, 0, 0, def) : p; }).join(" vs ")));
+  if (!lines.length) return text;
+  const base = String(text || "").replace(/\s+$/, "");
+  return (base ? base + "\n" : "") + lines.join("\n");
+}
+/** Remove one clock: in "A vs B" only that side goes, otherwise the whole line. */
+function ckRemovePart(text, index, part) {
+  const lines = String(text || "").split("\n");
+  const raw = lines[index];
+  if (raw === undefined) return text;
+  const parts = raw.trim().split(CK_VS);
+  if (parts.length < 2 || part === undefined) return ckRemoveLine(text, index);
+  lines[index] = /^\s*/.exec(raw)[0] + parts[part ? 0 : 1].trim();
+  return lines.join("\n");
+}
+function ckRemoveLine(text, index) {
+  const l = String(text || "").split("\n");
+  l.splice(index, 1);
+  return l.join("\n");
+}
+/** ```clocks blocks of a note: [{ start, end, prefix, body }]. */
+function findClockBlocks(md) {
+  const lines = String(md || "").split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = CK_FENCE.exec(lines[i]);
+    if (!m) continue;
+    const pre = m[1];
+    const fence = m[2];
+    let j = i + 1;
+    while (j < lines.length) {
+      const rest = lines[j].slice(pre.length).trim();
+      if (rest.startsWith(fence) && !rest.replace(/[`~]/g, "")) break;
+      j++;
+    }
+    if (j >= lines.length) break;
+    out.push({ start: i, end: j, prefix: pre, body: lines.slice(i + 1, j).map((l) => l.slice(pre.length)).join("\n") });
+    i = j;
+  }
+  return out;
+}
+function replaceClockBlock(md, n, fn) {
+  const b = findClockBlocks(md)[n];
+  if (!b) return null;
+  const lines = String(md).split("\n");
+  const body = fn(b.body).replace(/\s+$/, "").split("\n").map((l) => b.prefix + l);
+  lines.splice(b.start + 1, b.end - b.start - 1, ...body);
+  return lines.join("\n");
+}
+/** "4", "4h", "3:30", "3h 30m", "210m", "90 min" → minutes (null if unreadable). */
+function parseDuration(str) {
+  const t = String(str || "").trim().toLowerCase().replace(",", ".");
+  if (!t) return null;
+  let m = /^(\d+):(\d{1,2})$/.exec(t);
+  if (m) return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  m = /^(?:(\d+(?:\.\d+)?)\s*h(?:ours?|od(?:in[ay]?)?)?)?\s*(?:(\d+)\s*m(?:in(?:utes?)?)?)?$/.exec(t);
+  if (m && (m[1] || m[2])) return Math.round((parseFloat(m[1] || "0") * 60) + parseInt(m[2] || "0", 10));
+  m = /^(\d+(?:\.\d+)?)$/.exec(t);
+  if (m) {
+    const n = parseFloat(m[1]);
+    return n <= 12 ? Math.round(n * 60) : Math.round(n);
+  }
+  return null;
+}
+/** 9300 s → "2:35:00"; minutes → "4 h", "3 h 30 min". */
+function hms(ms) {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const p = (n) => String(n).padStart(2, "0");
+  return `${Math.floor(sec / 3600)}:${p(Math.floor((sec % 3600) / 60))}:${p(sec % 60)}`;
+}
+function hm(ms) {
+  const min = Math.max(0, Math.ceil(ms / 60000));
+  return `${Math.floor(min / 60)}:${String(min % 60).padStart(2, "0")}`;
+}
+function durationText(min) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h && m ? `${h} h ${m} min` : h ? `${h} h` : `${m} min`;
+}
+
+/* ================= Random tables (Randomness plugin) ================= */
+
+const STARTER_FOLDER = "GM Screen";
+const STARTER_FILES = {
+  "GM Screen Loot.rdm": "// GM Screen Loot - starter loot & treasure tables for the Game Master Interactive Screen.\n// Coins and item counts follow the D&D 2024 treasure guidelines by challenge rating.\n// Edit freely: add your own items, change weights (the number before the colon), add tables.\n// Several things in one result are separated by \"; \" so the GM screen can hand them out item by item.\n\nTitle: GM Screen Loot\n\n// ---------- Individual treasure (what one creature carries) ----------\n\nTable: LootIndividualCR0to4\n3: {3d6} gp\n1: {3d6} gp; [@Trinket]\n1: {3d6} gp; [@PocketJunk]\n\nTable: LootIndividualCR5to10\n3: {2d8*10} gp\n1: {2d8*10} gp; [@Gem10]\n1: {2d8*10} gp; [@Trinket]\n\nTable: LootIndividualCR11to16\n3: {2d10*10} pp\n1: {2d10*10} pp; [@Gem50]\n1: {2d10*10} pp; [@Art25]\n\nTable: LootIndividualCR17plus\n3: {2d8*100} pp\n1: {2d8*100} pp; [@Gem100]\n1: {2d8*100} pp; [@Art250]\n\n// ---------- Treasure hoards (a lair, a vault, a dragon's bed) ----------\n\nTable: LootHoardCR0to4\n2: {2d4*100} gp; [@HoardMagicCR0to4]\n1: {2d4*100} gp; [@Gem10]; [@Gem10]; [@HoardMagicCR0to4]\n1: {2d4*100} gp; [@Art25]; [@HoardMagicCR0to4]\n1: {2d4*100} gp; [@Gem50]; [@Trinket]; [@HoardMagicCR0to4]\n\nTable: LootHoardCR5to10\n2: {8d10*100} gp; [@HoardMagicCR5to10]\n1: {8d10*100} gp; [@Gem50]; [@Gem50]; [@Gem100]; [@HoardMagicCR5to10]\n1: {8d10*100} gp; [@Art250]; [@HoardMagicCR5to10]\n1: {8d10*100} gp; [@Gem500]; [@Art25]; [@HoardMagicCR5to10]\n\nTable: LootHoardCR11to16\n2: {8d8*10000} gp; [@HoardMagicCR11to16]\n1: {8d8*10000} gp; [@Gem500]; [@Gem500]; [@Gem1000]; [@HoardMagicCR11to16]\n1: {8d8*10000} gp; [@Art750]; [@Art750]; [@HoardMagicCR11to16]\n1: {8d8*10000} gp; [@Gem1000]; [@Art2500]; [@HoardMagicCR11to16]\n\nTable: LootHoardCR17plus\n2: {6d10*10000} gp; [@HoardMagicCR17plus]\n1: {6d10*10000} gp; [@Gem1000]; [@Gem5000]; [@HoardMagicCR17plus]\n1: {6d10*10000} gp; [@Art2500]; [@Art7500]; [@HoardMagicCR17plus]\n1: {6d10*10000} gp; [@Gem5000]; [@Gem5000]; [@Art7500]; [@HoardMagicCR17plus]\n\n// Magic items in a hoard: CR 0-4 1d4-1, CR 5-10 1d3, CR 11-16 1d4, CR 17+ 1d6.\nTable: HoardMagicCR0to4\n1: no magic items\n1: [@MagicTier1]\n1: [@MagicTier1]; [@MagicTier1]\n1: [@MagicTier1]; [@MagicTier1]; [@MagicTier1]\n\nTable: HoardMagicCR5to10\n1: [@MagicTier2]\n1: [@MagicTier2]; [@MagicTier2]\n1: [@MagicTier2]; [@MagicTier2]; [@MagicTier2]\n\nTable: HoardMagicCR11to16\n1: [@MagicTier3]\n1: [@MagicTier3]; [@MagicTier3]\n1: [@MagicTier3]; [@MagicTier3]; [@MagicTier3]\n1: [@MagicTier3]; [@MagicTier3]; [@MagicTier3]; [@MagicTier3]\n\nTable: HoardMagicCR17plus\n1: [@MagicTier4]\n1: [@MagicTier4]; [@MagicTier4]\n1: [@MagicTier4]; [@MagicTier4]; [@MagicTier4]\n1: [@MagicTier4]; [@MagicTier4]; [@MagicTier4]; [@MagicTier4]\n1: [@MagicTier4]; [@MagicTier4]; [@MagicTier4]; [@MagicTier4]; [@MagicTier4]\n1: [@MagicTier4]; [@MagicTier4]; [@MagicTier4]; [@MagicTier4]; [@MagicTier4]; [@MagicTier4]\n\nTable: MagicTier1\n4: [@MagicCommon]\n2: [@MagicUncommon]\n\nTable: MagicTier2\n1: [@MagicCommon]\n4: [@MagicUncommon]\n2: [@MagicRare]\n\nTable: MagicTier3\n3: [@MagicRare]\n2: [@MagicVeryRare]\n\nTable: MagicTier4\n3: [@MagicVeryRare]\n2: [@MagicLegendary]\n\n// ---------- Magic items by rarity ----------\n\nTable: MagicCommon\n3: Potion of Healing\nPotion of Climbing\n4: Spell Scroll (Cantrip or 1st Level)\nBead of Nourishment\nBoots of False Tracks\nCandle of the Deep\nCast-Off Armor\nCharlatan's Die\nClockwork Amulet\nEnduring Spellbook\nHat of Wizardry\nHorn of Silent Alarm\nLock of Trickery\nMoon-Touched Sword\nMystery Key\nOrb of Direction\nPerfume of Bewitching\nPipe of Smoke Monsters\nPole of Collapsing\nRope of Mending\nRuby of the War Mage\nShield of Expression\nSmoldering Armor\nStaff of Birdcalls\nStaff of Flowers\nTankard of Sobriety\nUnbreakable Arrow\nVeteran's Cane\nWand of Pyrotechnics\nWand of Smiles\n\nTable: MagicUncommon\n2: Potion of Greater Healing\nPotion of Fire Breath\nPotion of Water Breathing\n3: Spell Scroll (2nd-3rd Level)\n2: +1 [@MagicWeapon]\n+1 Shield\nAlchemy Jug\nAmulet of Proof against Detection and Location\nBag of Holding\nBoots of Elvenkind\nBracers of Archery\nCloak of Elvenkind\nCloak of Protection\nDriftglobe\nEyes of the Eagle\nGauntlets of Ogre Power\nGoggles of Night\nHat of Disguise\nHeadband of Intellect\nImmovable Rod\nJavelin of Lightning\nMithral Armor\nPearl of Power\nRing of Jumping\nRing of Water Walking\nRope of Climbing\nSending Stones\nWand of Magic Detection\nWand of Magic Missiles\nWand of Web\nWinged Boots\n\nTable: MagicRare\n2: Potion of Superior Healing\nPotion of Invisibility\n2: Spell Scroll (4th-5th Level)\n2: +2 [@MagicWeapon]\n+1 Armor\n+2 Shield\nAmulet of Health\nBelt of Dwarvenkind\nBoots of Speed\nBracers of Defense\nCape of the Mountebank\nCloak of Displacement\nDagger of Venom\nElemental Gem\nFlame Tongue\nHorseshoes of Speed\nMace of Smiting\nNecklace of Fireballs\nPeriapt of Proof against Poison\nRing of Evasion\nRing of Protection\nRing of Spell Storing\nStaff of Healing\nSword of Wounding\nWand of Fireballs\nWand of Lightning Bolts\n\nTable: MagicVeryRare\n2: Potion of Supreme Healing\n3: Spell Scroll (6th-8th Level)\n2: +3 [@MagicWeapon]\n+2 Armor\n+3 Shield\nAnimated Shield\nBelt of Fire Giant Strength\nCarpet of Flying\nCrystal Ball\nDancing Sword\nDwarven Thrower\nManual of Bodily Health\nNine Lives Stealer\nRing of Regeneration\nRod of Absorption\nStaff of Fire\nStaff of Thunder and Lightning\nSword of Sharpness\nTome of Clear Thought\nWand of Polymorph\n\nTable: MagicLegendary\nSpell Scroll (9th Level)\n+3 Armor\nBelt of Cloud Giant Strength\nCloak of Invisibility\nDefender\nHoly Avenger\nIoun Stone of Mastery\nLuck Blade\nRing of Djinni Summoning\nRing of Three Wishes\nRobe of the Archmagi\nRod of Lordly Might\nScarab of Protection\nStaff of the Magi\nVorpal Sword\nWell of Many Worlds\n\nTable: MagicWeapon\n3: Longsword\n2: Shortsword\n2: Dagger\n2: Longbow\nShortbow\nBattleaxe\nWarhammer\nGreatsword\nGreataxe\nRapier\nScimitar\nMace\nSpear\nLight Crossbow\nHeavy Crossbow\nHandaxe\nJavelin\nQuarterstaff\n\n// ---------- Gems by value ----------\n\nTable: GemAny\n5: [@Gem10]\n4: [@Gem50]\n3: [@Gem100]\n2: [@Gem500]\n1: [@Gem1000]\n\nTable: Gem10\nAzurite (10 gp)\nBanded agate (10 gp)\nBlue quartz (10 gp)\nEye agate (10 gp)\nHematite (10 gp)\nLapis lazuli (10 gp)\nMalachite (10 gp)\nMoss agate (10 gp)\nObsidian (10 gp)\nRhodochrosite (10 gp)\nTiger eye (10 gp)\nTurquoise (10 gp)\n\nTable: Gem50\nBloodstone (50 gp)\nCarnelian (50 gp)\nChalcedony (50 gp)\nChrysoprase (50 gp)\nCitrine (50 gp)\nJasper (50 gp)\nMoonstone (50 gp)\nOnyx (50 gp)\nRock crystal (50 gp)\nSardonyx (50 gp)\nRose quartz (50 gp)\nZircon (50 gp)\n\nTable: Gem100\nAmber (100 gp)\nAmethyst (100 gp)\nChrysoberyl (100 gp)\nCoral (100 gp)\nGarnet (100 gp)\nJade (100 gp)\nJet (100 gp)\nPearl (100 gp)\nSpinel (100 gp)\nTourmaline (100 gp)\n\nTable: Gem500\nAlexandrite (500 gp)\nAquamarine (500 gp)\nBlack pearl (500 gp)\nBlue spinel (500 gp)\nPeridot (500 gp)\nTopaz (500 gp)\n\nTable: Gem1000\nBlack opal (1000 gp)\nBlue sapphire (1000 gp)\nEmerald (1000 gp)\nFire opal (1000 gp)\nOpal (1000 gp)\nStar ruby (1000 gp)\nStar sapphire (1000 gp)\nYellow sapphire (1000 gp)\n\nTable: Gem5000\nBlack sapphire (5000 gp)\nDiamond (5000 gp)\nJacinth (5000 gp)\nRuby (5000 gp)\n\n// ---------- Art objects by value ----------\n\nTable: ArtAny\n4: [@Art25]\n3: [@Art250]\n2: [@Art750]\n1: [@Art2500]\n\nTable: Art25\nPewter tankard with a hunting scene (25 gp)\nCarved bone hair comb (25 gp)\nSilver thimble on a fine chain (25 gp)\nPainted wooden icon of a local saint (25 gp)\nEmbroidered silk purse (25 gp)\nBrass compass with a cracked lid (25 gp)\nCopper bracelet set with river glass (25 gp)\nSmall oil portrait of a stern noblewoman (25 gp)\nSet of carved ivory gaming dice (25 gp)\nVelvet masquerade mask with silver thread (25 gp)\n\nTable: Art250\nGold signet ring of a fallen house (250 gp)\nSilver hand mirror with an engraved back (250 gp)\nBronze statuette of a rearing horse (250 gp)\nTapestry of a famous battle (250 gp)\nJade-handled letter opener (250 gp)\nSilk shawl woven with gold thread (250 gp)\nSilver music box playing a lullaby (250 gp)\nEnamelled snuffbox with a pastoral scene (250 gp)\nIvory chess set in a lacquered case (250 gp)\nSilver circlet with small pearls (250 gp)\n\nTable: Art750\nGold chalice rimmed with garnets (750 gp)\nElectrum ceremonial dagger (750 gp)\nMarble bust of a forgotten emperor (750 gp)\nLute of dark wood with mother-of-pearl inlay (750 gp)\nSilver reliquary with a saint's finger bone (750 gp)\nPlatinum brooch shaped like a dragonfly (750 gp)\nGilded hourglass filled with crushed sapphire (750 gp)\nObsidian mask with gold leaf (750 gp)\n\nTable: Art2500\nGold necklace set with fire opals (2500 gp)\nMasterwork painting of a royal wedding (2500 gp)\nPlatinum armband with a sapphire (2500 gp)\nGold astrolabe with jewelled stars (2500 gp)\nCrystal decanter with a platinum stopper (2500 gp)\nEmbroidered royal mantle with moonstones (2500 gp)\n\nTable: Art7500\nJewelled gold crown (7500 gp)\nPlatinum ring with a star ruby (7500 gp)\nGold reliquary set with emeralds (7500 gp)\nJade throne miniature with solid gold figures (7500 gp)\nBejewelled ivory drinking horn (7500 gp)\n\n// ---------- Small finds ----------\n\nTable: Trinket\nA tiny brass key that fits no lock anyone has found\nA glass eye that sometimes seems to blink\nA lock of silver hair tied with a black ribbon\nA wooden token carved with a tavern's name\nA child's tin soldier missing its sword\nA pressed flower inside a folded love letter\nA coin from a kingdom no one remembers\nA small bell that makes no sound\nA map fragment showing half of an island\nA bone whistle shaped like a bird\nA ring of woven grass that never wilts\nA pouch of seven perfectly round black pebbles\nA cracked monocle with a gold rim\nA wax seal bearing an unknown coat of arms\nA vial of sand that is always warm\nA thimble engraved with the word \"remember\"\nA deck of cards missing every queen\nA feather that falls upward when dropped\nA wooden spoon carved with a face\nA candle stub that smells of the sea\nA silver button from a guard's uniform\nA smooth stone with a hole through the middle\nA miniature portrait of a stranger\nA tooth from some large, unknown beast\nA prayer bead from a temple that burned down\nA jar holding a single, very old firefly\nA brass gear from an unknown machine\nAn IOU for 100 gold, signed by a duke\n\nTable: PocketJunk\nA half-eaten apple\nA ball of string and two buttons\nA crumpled shopping list\nA wooden comb with missing teeth\nA pair of loaded dice\nA whetstone\nA stub of chalk\nA small knife with a bent tip\nA tin of boot grease\nA bit of dried meat wrapped in cloth\nA cheap brass ring\nA letter from a worried mother\nA pipe and a pinch of tobacco\nA lucky rabbit's foot\nA crude drawing of a dragon\nA wanted poster with a familiar face\n",
+  "GM Screen Everyday.rdm": "// GM Screen Everyday - quick tables a GM needs at the table.\n// Edit freely: change lines, add new ones, change weights (the number before the colon).\n\nTitle: GM Screen Everyday\n\nTable: TavernName\nThe [@TavernAdj] [@TavernNoun]\nThe [@TavernNoun] and [@TavernNoun]\n2: The [@TavernAdj] [@TavernNoun]\n\nTable: TavernAdj\nGilded\nRusty\nDrunken\nLaughing\nSleeping\nPrancing\nCrooked\nSilver\nWandering\nHowling\nSly\nBroken\nMerry\nLonely\nGolden\nBlack\n\nTable: TavernNoun\nGoat\nDragon\nBarrel\nLantern\nGriffon\nStag\nKettle\nOwl\nAnchor\nWyvern\nHound\nBoar\nHarp\nMermaid\nCrown\nCandle\n\nTable: NPCQuirk\nSpeaks in a whisper, as if someone is listening\nLaughs at their own jokes before finishing them\nConstantly polishes a ring that isn't there\nCalls everyone \"friend\", even enemies\nSniffs every item before buying it\nCounts things out loud when nervous\nQuotes a holy book, usually wrongly\nRefuses to sit with their back to a door\nWears far too much perfume\nCollects other people's buttons\nAnswers questions with questions\nHums the same three notes over and over\nVery proud of a dreadful moustache\nInsists on shaking hands with both hands\nTells a different story about every scar\nAlways hungry, always eating\nPretends to be much older than they are\nNever uses anyone's name, only nicknames\nSpeaks to their pet as if it's a business partner\nExtremely polite, until money comes up\n\nTable: Rumour\nThe old mill burns lights at night, but no one lives there.\nA merchant's caravan vanished on the north road three days ago.\nThe captain of the guard takes bribes in the bathhouse.\nSomeone has been buying every crow in the market.\nThe temple bell rang by itself at midnight.\nA noble's daughter ran away with a travelling bard.\nThere's a map to a dwarven vault for sale, cheap.\nThe well water tastes of iron since the last storm.\nWolves have been seen walking on two legs near the forest.\nA new tax collector arrives next week, and he's brought soldiers.\nThe blacksmith forged a sword he refuses to sell.\nChildren have been drawing the same strange symbol on walls.\nThe harbour master is paying double for brave sailors.\nA hermit in the hills claims he can speak to the dead.\nSomeone poisoned the mayor's prize horse.\n\nTable: Complication\nAn old enemy recognises one of the heroes.\nThe weather turns sharply worse.\nA bridge, road or door is out - they need another way.\nA guard demands papers no one has.\nSomeone important is in the wrong place at the wrong time.\nAn ally sends a desperate message.\nThe thing they came for has already been taken.\nA fire breaks out nearby.\nA crowd gathers and gets in the way.\nEquipment breaks at the worst moment.\nA rival group is after the same goal.\nA child follows them and won't go home.\nThe authorities arrive early.\nA trusted contact turns out to be lying.\nThe heroes are mistaken for someone else.\n\nTable: Weather\n3: Clear skies and a light breeze\n2: Overcast and cool\n2: Light drizzle, roads getting muddy\nHeavy rain, visibility poor\nThick fog until midday\nStrong winds, hard to hear each other\nA thunderstorm rolls in by evening\nUnusually hot and humid\nFrost in the morning, cold all day\nSnow flurries\n",
+};
+const STARTER_TABLES = [
+  ["Loot", "Pocket loot · CR 0–4", "LootIndividualCR0to4", "loot"],
+  ["Loot", "Pocket loot · CR 5–10", "LootIndividualCR5to10", "loot"],
+  ["Loot", "Pocket loot · CR 11–16", "LootIndividualCR11to16", "loot"],
+  ["Loot", "Pocket loot · CR 17+", "LootIndividualCR17plus", "loot"],
+  ["Loot", "Hoard · CR 0–4", "LootHoardCR0to4", "loot"],
+  ["Loot", "Hoard · CR 5–10", "LootHoardCR5to10", "loot"],
+  ["Loot", "Hoard · CR 11–16", "LootHoardCR11to16", "loot"],
+  ["Loot", "Hoard · CR 17+", "LootHoardCR17plus", "loot"],
+  ["Magic items", "Common", "MagicCommon", "loot"],
+  ["Magic items", "Uncommon", "MagicUncommon", "loot"],
+  ["Magic items", "Rare", "MagicRare", "loot"],
+  ["Magic items", "Very rare", "MagicVeryRare", "loot"],
+  ["Magic items", "Legendary", "MagicLegendary", "loot"],
+  ["Valuables", "Gem", "GemAny", "loot"],
+  ["Valuables", "Art object", "ArtAny", "loot"],
+  ["Valuables", "Trinket", "Trinket", "loot"],
+  ["Valuables", "What's in their pockets?", "PocketJunk", "loot"],
+  ["At the table", "Tavern name", "TavernName", "everyday"],
+  ["At the table", "NPC quirk", "NPCQuirk", "everyday"],
+  ["At the table", "Rumour", "Rumour", "everyday"],
+  ["At the table", "Complication", "Complication", "everyday"],
+  ["At the table", "Weather", "Weather", "everyday"],
+].map(([group, label, name, file]) => ({ id: `st-${name}`, group, label, name, starter: file === "loot" ? "GM Screen Loot.rdm" : "GM Screen Everyday.rdm" }));
+
+const COINS = ["pp", "gp", "ep", "sp", "cp"];
+/** HTML/markdown result → plain text. */
+function plainResult(text) {
+  return String(text || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li)>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/\*\*|__/g, "");
+}
+/**
+ * Split a loot result into coins and items. Pieces are separated by ";", new lines or bullets.
+ * "120 gp" → coins; "Azurite (10 gp)" → item with a cost; "2x Potion of Healing" → qty 2.
+ */
+function parseLoot(text) {
+  const coins = { pp: 0, gp: 0, ep: 0, sp: 0, cp: 0 };
+  const items = [];
+  const pieces = plainResult(text).split(/[;\n•]+/).map((x) => x.trim().replace(/^[-*]\s+/, "").replace(/[.,]$/, "")).filter(Boolean);
+  for (const piece of pieces) {
+    if (/^no (magic )?items?$/i.test(piece) || /^nothing$/i.test(piece)) continue;
+    const coinOnly = /^(?:(?:\d[\d\s,.]*)\s*(?:pp|gp|ep|sp|cp)\b\s*(?:,|and|\+)?\s*)+$/i.test(piece);
+    if (coinOnly) {
+      for (const m of piece.matchAll(/(\d[\d\s,.]*)\s*(pp|gp|ep|sp|cp)\b/gi)) coins[m[2].toLowerCase()] += parseInt(m[1].replace(/[\s,.]/g, ""), 10) || 0;
+      continue;
+    }
+    let name = piece;
+    let qty = 1;
+    let cost = "";
+    let m = /^(\d+)\s*(?:x|×)\s+(.+)$/i.exec(name) || /^(\d+)\s+(?=[A-Z])(.+)$/.exec(name);
+    if (m) { qty = parseInt(m[1], 10); name = m[2]; }
+    m = /^(.+?)\s*\(\s*(?:x|×)\s*(\d+)\s*\)$/i.exec(name);
+    if (m) { name = m[1]; qty = parseInt(m[2], 10); }
+    m = /^(.+?)\s*\((\d[\d,]*)\s*(pp|gp|ep|sp|cp)\)$/i.exec(name);
+    if (m) { name = m[1]; cost = `${m[2].replace(/,/g, "")} ${m[3].toUpperCase()}`; }
+    name = name.trim();
+    if (!name) continue;
+    const same = items.find((x) => x.name.toLowerCase() === name.toLowerCase() && x.cost === cost);
+    if (same) same.qty += qty;
+    else items.push({ name, qty, cost });
+  }
+  return { coins, items, any: items.length > 0 || COINS.some((c) => coins[c]) };
+}
+const coinText = (c) => COINS.filter((k) => c[k]).map((k) => `${c[k].toLocaleString("en-US")} ${k}`).join(", ");
+/** Split coins between n people; leftovers go to the first ones. */
+function splitCoins(coins, n) {
+  const out = Array.from({ length: n }, () => ({ pp: 0, gp: 0, ep: 0, sp: 0, cp: 0 }));
+  for (const k of COINS) {
+    const total = coins[k] || 0;
+    const each = Math.floor(total / n);
+    let rest = total - each * n;
+    for (const o of out) {
+      o[k] = each + (rest > 0 ? 1 : 0);
+      if (rest > 0) rest--;
+    }
+  }
+  return out;
+}
+const slugParty = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+const itemKey = (name) => String(name || "").toLowerCase().replace(/[’‘`]/g, "'").replace(/\s+/g, " ").trim();
+const invId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+/* ================= Soundboard ================= */
+
+const AUDIO_EXT = ["mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "webm", "opus"];
+const isAudio = (f) => f instanceof TFile && AUDIO_EXT.includes(String(f.extension || "").toLowerCase());
+const PAD_COLORS = { gray: "#8a8f98", red: "#e5484d", orange: "#f76b15", yellow: "#e2a336", green: "#30a46c", teal: "#12a594", blue: "#0090ff", purple: "#8e4ec6", pink: "#d6409f" };
+const PAD_KINDS = {
+  music: { label: "Music", desc: "One at a time – starting another music button fades this one out.", icon: "music", color: "blue", loop: true },
+  ambience: { label: "Ambience", desc: "Loops and plays alongside music and other ambience (rain, tavern, wind).", icon: "wind", color: "green", loop: true },
+  effect: { label: "Sound effect", desc: "Plays once. Pressing it again starts it from the beginning.", icon: "zap", color: "orange", loop: false },
+};
+const PAD_ICONS = ["music", "drum", "guitar", "piano", "mic", "wind", "cloud-rain", "cloud-lightning", "snowflake", "flame", "waves", "trees", "mountain", "castle", "tent", "beer", "swords", "sword", "shield", "skull", "ghost", "bone", "bird", "dog", "footprints", "door-open", "bell", "sparkles", "wand", "crown", "heart", "moon", "sun", "zap", "volume-2"];
+const padKind = (pad) => (PAD_KINDS[pad && pad.kind] ? pad.kind : "music");
+const padLoops = (pad) => (pad && typeof pad.loop === "boolean" ? pad.loop : PAD_KINDS[padKind(pad)].loop);
+function shuffled(list) {
+  const a = list.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/**
+ * Plays soundboard buttons. Lives on the plugin, so sounds keep going while
+ * tiles are re-drawn, screens switched or the GM screen tab is closed.
+ */
+class SoundBoard {
+  constructor(plugin) {
+    this.plugin = plugin;
+    this.playing = new Map(); // pad id → { pad, queue, index, audio, stopping, errors }
+    this.subs = new Set();
+  }
+  get app() { return this.plugin.app; }
+  subscribe(fn) {
+    this.subs.add(fn);
+    return () => this.subs.delete(fn);
+  }
+  emit(id) {
+    for (const fn of [...this.subs]) {
+      try { fn(id); } catch (e) { console.error(e); }
+    }
+  }
+  master() { return Math.min(100, Math.max(0, Number(this.plugin.settings.sound.volume) || 0)) / 100; }
+  fadeMs() { const v = Number(this.plugin.settings.sound.fade); return Number.isFinite(v) ? Math.max(0, v) : 1200; }
+  vol(pad) {
+    const v = pad.volume === undefined ? 80 : Number(pad.volume);
+    return Math.min(1, Math.max(0, (Math.min(100, Math.max(0, v)) / 100) * this.master()));
+  }
+  /** Files (or web links) a button plays, in folder order. */
+  tracks(pad) {
+    const src = pad.src || {};
+    if (src.type === "url") return src.path ? [src.path] : [];
+    const f = this.app.vault.getAbstractFileByPath(src.path || "");
+    if (isAudio(f)) return [f];
+    if (f instanceof TFolder) {
+      const out = [];
+      const walk = (d) => {
+        for (const c of d.children) {
+          if (c instanceof TFolder) walk(c);
+          else if (isAudio(c)) out.push(c);
+        }
+      };
+      walk(f);
+      return out.sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true }));
+    }
+    return [];
+  }
+  urlOf(t) { return typeof t === "string" ? t : this.app.vault.getResourcePath(t); }
+  nameOf(t) {
+    if (!t) return "";
+    if (typeof t !== "string") return t.basename;
+    try { return decodeURIComponent(t.split(/[?#]/)[0].split("/").pop() || t); } catch (e) { return t; }
+  }
+  state(id) {
+    const p = this.playing.get(id);
+    if (!p) return null;
+    const a = p.audio;
+    const d = a && Number.isFinite(a.duration) && a.duration > 0 ? a.duration : 0;
+    return { track: this.nameOf(p.queue[p.index]), index: p.index, count: p.queue.length, progress: d ? Math.min(1, a.currentTime / d) : 0, stopping: p.stopping };
+  }
+  isPlaying(id) { const p = this.playing.get(id); return !!p && !p.stopping; }
+  toggle(pad) {
+    if (this.isPlaying(pad.id)) {
+      if (padKind(pad) === "effect") return this.play(pad);
+      return this.stop(pad.id);
+    }
+    return this.play(pad);
+  }
+  play(pad) {
+    let queue = this.tracks(pad);
+    if (!queue.length) {
+      new Notice(`"${pad.label || "Sound"}" has no audio to play. Right-click it → Edit… to pick a file or folder.`);
+      return;
+    }
+    if (pad.order === "shuffle") queue = shuffled(queue);
+    const kind = padKind(pad);
+    if (kind === "music") for (const [id, o] of this.playing) if (id !== pad.id && padKind(o.pad) === "music") this.stop(id);
+    const old = this.playing.get(pad.id);
+    if (old) this.kill(old);
+    const p = { pad, queue, index: 0, audio: null, stopping: false, errors: 0 };
+    this.playing.set(pad.id, p);
+    this.start(p, kind !== "effect");
+    this.emit(pad.id);
+  }
+  start(p, fadeIn) {
+    const a = new Audio(this.urlOf(p.queue[p.index]));
+    p.audio = a;
+    const target = this.vol(p.pad);
+    const fade = fadeIn && this.fadeMs() > 0;
+    a.volume = fade ? 0 : target;
+    a.loop = p.queue.length === 1 && padLoops(p.pad);
+    a.addEventListener("timeupdate", () => this.emit(p.pad.id));
+    a.addEventListener("ended", () => { if (p.audio === a) this.advance(p); });
+    a.addEventListener("error", () => {
+      if (p.audio !== a || this.playing.get(p.pad.id) !== p) return;
+      new Notice(`Can't play ${this.nameOf(p.queue[p.index])}`);
+      this.advance(p, true);
+    });
+    const pr = a.play();
+    const ok = () => { if (fade && p.audio === a && !p.stopping) this.fade(a, target, this.fadeMs()); };
+    if (pr && typeof pr.then === "function") pr.then(ok, (e) => { if (p.audio === a && e && e.name !== "AbortError") { console.warn("GM screen sound:", e); this.advance(p, true); } });
+    else ok();
+  }
+  advance(p, failed) {
+    if (this.playing.get(p.pad.id) !== p || p.stopping) return;
+    if (failed && ++p.errors >= p.queue.length) return this.end(p);
+    p.index++;
+    if (p.index >= p.queue.length) {
+      if (!padLoops(p.pad)) return this.end(p);
+      p.index = 0;
+      if (p.pad.order === "shuffle" && p.queue.length > 2) p.queue = shuffled(p.queue);
+    }
+    this.start(p, false);
+    this.emit(p.pad.id);
+  }
+  /** Skip to the next track of a folder button. */
+  next(id) {
+    const p = this.playing.get(id);
+    if (!p || p.stopping || p.queue.length < 2) return;
+    this.kill(p);
+    p.index = (p.index + 1) % p.queue.length;
+    this.start(p, true);
+    this.emit(id);
+  }
+  stop(id, now) {
+    const p = this.playing.get(id);
+    if (!p || p.stopping) return;
+    p.stopping = true;
+    this.emit(id);
+    const a = p.audio;
+    if (now || !a || this.fadeMs() <= 0 || a.paused) return this.end(p);
+    this.fade(a, 0, this.fadeMs(), () => this.end(p));
+  }
+  stopAll(now) { for (const id of [...this.playing.keys()]) this.stop(id, now); }
+  end(p) {
+    this.kill(p);
+    if (this.playing.get(p.pad.id) === p) this.playing.delete(p.pad.id);
+    this.emit(p.pad.id);
+  }
+  kill(p) {
+    const a = p.audio;
+    if (!a) return;
+    if (a._gmsFade) window.clearInterval(a._gmsFade);
+    a._gmsFade = 0;
+    try { a.pause(); } catch (e) { /* already gone */ }
+  }
+  fade(a, to, ms, done) {
+    if (a._gmsFade) window.clearInterval(a._gmsFade);
+    const from = a.volume;
+    const steps = Math.max(1, Math.round(ms / 50));
+    let i = 0;
+    a._gmsFade = window.setInterval(() => {
+      i++;
+      a.volume = Math.min(1, Math.max(0, from + ((to - from) * i) / steps));
+      if (i >= steps) {
+        window.clearInterval(a._gmsFade);
+        a._gmsFade = 0;
+        if (done) done();
+      }
+    }, 50);
+  }
+  /** Volume slider moved / a button's volume edited. */
+  refreshVolumes() {
+    for (const p of this.playing.values()) if (p.audio && !p.audio._gmsFade && !p.stopping) p.audio.volume = this.vol(p.pad);
+  }
+  /** Button settings changed while it plays (kind, loop, volume). */
+  updated(pad) {
+    const p = this.playing.get(pad.id);
+    if (!p) return;
+    if (p.audio) p.audio.loop = p.queue.length === 1 && padLoops(pad);
+    this.refreshVolumes();
+    this.emit(pad.id);
+  }
+}
+
+class AudioPicker extends FuzzySuggestModal {
+  constructor(plugin, onPick) {
+    super(plugin.app);
+    this.onPick = onPick;
+    this.setPlaceholder("Pick a track or a folder of tracks");
+  }
+  getItems() {
+    const files = this.app.vault.getFiles().filter(isAudio);
+    const folders = new Map();
+    for (const f of files) {
+      for (let d = f.parent; d && d.path && d.path !== "/"; d = d.parent) folders.set(d.path, (folders.get(d.path) || 0) + 1);
+    }
+    const out = [...folders].map(([path, count]) => ({ type: "folder", path, count }));
+    for (const f of files) out.push({ type: "file", path: f.path });
+    return out.sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true }));
+  }
+  getItemText(it) { return it.type === "folder" ? `📁 ${it.path}  (${it.count} tracks)` : `♪ ${it.path}`; }
+  onChooseItem(it) { this.onPick(it); }
+  onOpen() {
+    super.onOpen();
+    if (!this.app.vault.getFiles().some(isAudio)) new Notice(`No audio files in the vault yet (${AUDIO_EXT.join(", ")}). Put some in a folder, e.g. "Sounds/Tavern".`);
+  }
+}
+
+class SoundPadModal extends Modal {
+  constructor(plugin, pad, onSave, onDelete) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.isNew = !pad;
+    this.pad = pad ? clone(pad) : { id: uid(), label: "", kind: "music", src: null, order: "order", volume: 80 };
+    this.onSave = onSave;
+    this.onDelete = onDelete;
+  }
+  onOpen() {
+    this.titleEl.setText(this.isNew ? "New sound button" : `Edit "${this.pad.label || "Sound"}"`);
+    this.draw();
+  }
+  draw() {
+    const el = this.contentEl;
+    const p = this.pad;
+    el.empty();
+    el.addClass("gms-pad-modal");
+    const kind = padKind(p);
+
+    const srcText = () => {
+      if (!p.src || !p.src.path) return "Nothing picked yet.";
+      if (p.src.type === "url") return `Web link: ${p.src.path}`;
+      if (p.src.type === "folder") return `Folder: ${p.src.path} (${this.plugin.sound.tracks(p).length} tracks)`;
+      return `Track: ${p.src.path}`;
+    };
+    const srcSet = new Setting(el).setName("Sound").setDesc(srcText());
+    srcSet.addButton((b) => b.setButtonText("Pick track or folder…").setCta().onClick(() => new AudioPicker(this.plugin, (it) => {
+      p.src = { type: it.type, path: it.path };
+      if (!p.label) p.label = it.path.split("/").pop().replace(/\.[^.]+$/, "");
+      if (this.isNew && !p.kindTouched) p.kind = it.type === "folder" ? "music" : "effect";
+      this.draw();
+    }).open()));
+    new Setting(el)
+      .setName("…or a web link")
+      .setDesc("A direct link to an audio file (https://…/rain.mp3). Streaming sites like YouTube or Spotify won't work.")
+      .addText((t) => t.setPlaceholder("https://").setValue(p.src && p.src.type === "url" ? p.src.path : "").onChange((v) => {
+        v = v.trim();
+        if (v) p.src = { type: "url", path: v };
+        else if (p.src && p.src.type === "url") p.src = null;
+      }));
+    new Setting(el).setName("Name").addText((t) => t.setValue(p.label || "").setPlaceholder("Tavern, Battle, Thunder…").onChange((v) => (p.label = v)));
+    new Setting(el)
+      .setName("Type")
+      .setDesc(PAD_KINDS[kind].desc)
+      .addDropdown((d) => {
+        for (const [k, v] of Object.entries(PAD_KINDS)) d.addOption(k, v.label);
+        d.setValue(kind).onChange((v) => {
+          p.kind = v;
+          p.kindTouched = true;
+          delete p.loop;
+          this.draw();
+        });
+      });
+    if (!p.src || p.src.type === "folder") {
+      new Setting(el)
+        .setName("Order")
+        .setDesc("For a folder: play the tracks as they're sorted, or shuffled.")
+        .addDropdown((d) => d.addOption("order", "In order").addOption("shuffle", "Shuffle").setValue(p.order === "shuffle" ? "shuffle" : "order").onChange((v) => (p.order = v)));
+    }
+    new Setting(el)
+      .setName("Repeat")
+      .setDesc("Start again when the last track ends.")
+      .addToggle((t) => t.setValue(padLoops(p)).onChange((v) => (p.loop = v)));
+    new Setting(el)
+      .setName("Volume")
+      .addSlider((s) => s.setLimits(0, 100, 5).setValue(p.volume === undefined ? 80 : p.volume).setDynamicTooltip().onChange((v) => (p.volume = v)));
+
+    const colors = new Setting(el).setName("Colour").setClass("gms-pad-wrap").settingEl;
+    const sw = colors.createDiv({ cls: "gms-pad-swatches" });
+    const cur = p.color || PAD_KINDS[kind].color;
+    for (const [k, hex] of Object.entries(PAD_COLORS)) {
+      const b = sw.createEl("button", { cls: "gms-pad-swatch", attr: { "aria-label": k } });
+      b.style.setProperty("--gms-pad", hex);
+      b.toggleClass("is-on", k === cur);
+      b.onclick = () => { p.color = k; this.draw(); };
+    }
+    const icons = new Setting(el).setName("Icon").setClass("gms-pad-wrap").settingEl;
+    const ig = icons.createDiv({ cls: "gms-pad-icons" });
+    const curIcon = p.icon || PAD_KINDS[kind].icon;
+    for (const name of PAD_ICONS) {
+      const b = ig.createEl("button", { cls: "gms-pad-iconbtn", attr: { "aria-label": name } });
+      setIcon(b, name);
+      b.toggleClass("is-on", name === curIcon);
+      b.onclick = () => { p.icon = name; this.draw(); };
+    }
+
+    const row = el.createDiv({ cls: "modal-button-container" });
+    if (!this.isNew && this.onDelete) {
+      const del = row.createEl("button", { text: "Remove button", cls: "mod-warning" });
+      del.onclick = () => { this.close(); this.onDelete(); };
+    }
+    row.createEl("button", { text: this.isNew ? "Add" : "Save", cls: "mod-cta" }).onclick = () => {
+      if (!p.src || !p.src.path) return new Notice("Pick a track or folder first.");
+      delete p.kindTouched;
+      if (!p.label) p.label = this.plugin.sound.nameOf(p.src.type === "url" ? p.src.path : p.src.path.split("/").pop()).replace(/\.[^.]+$/, "");
+      this.close();
+      this.onSave(p);
+    };
+    row.createEl("button", { text: "Cancel" }).onclick = () => this.close();
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+/**
+ * Hand rolled loot out to one party (One DnD Character Sheet): pick the party, then who takes
+ * each item, and where the coins go (split evenly between the ticked members, one member,
+ * or the party's shared inventory).
+ */
+class LootHandoutModal extends Modal {
+  constructor(plugin, text, onDone) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.loot = parseLoot(text);
+    this.onDone = onDone;
+  }
+  onOpen() {
+    this.titleEl.setText("Hand out loot");
+    this.contentEl.addClass("gms-handout");
+    this.parties = this.plugin.lootParties();
+    if (!this.parties.length) {
+      this.contentEl.createDiv({ cls: "setting-item-description", text: "No party found. Create a party in One DnD Character Sheet (party groups), or pick your party in the GM screen settings." });
+      return;
+    }
+    this.party = this.parties[this.plugin.defaultLootParty(this.parties)];
+    this.resetPlan();
+    this.draw();
+  }
+  /** Default plan for the chosen party: items to the party inventory (or the first member), coins split between everyone. */
+  resetPlan() {
+    const opts = this.recipients();
+    const first = opts[0] ? opts[0].key : "";
+    this.loot.items.forEach((it) => (it.to = first));
+    this.coinMode = this.party.members.length > 1 ? "split" : first;
+    this.splitWith = new Set(this.party.members.map((m) => m.path));
+  }
+  /** Who can receive things: the party inventory first (when there is one), then each member. */
+  recipients() {
+    const out = [];
+    if (this.party.inventory) out.push({ key: this.party.inventory.path, label: `Party inventory (${this.party.name})`, target: this.party.inventory });
+    for (const m of this.party.members) out.push({ key: m.path, label: m.name, target: m });
+    return out;
+  }
+  draw() {
+    const el = this.contentEl;
+    el.empty();
+    const opts = this.recipients();
+
+    new Setting(el).setName("Party").setDesc(this.party.members.map((m) => m.name).join(", ") || "No members").addDropdown((d) => {
+      this.parties.forEach((x, i) => d.addOption(String(i), x.name));
+      d.setValue(String(this.parties.indexOf(this.party))).onChange((v) => {
+        this.party = this.parties[Number(v)];
+        this.resetPlan();
+        this.draw();
+      });
+    });
+
+    /* items */
+    if (this.loot.items.length) {
+      el.createDiv({ cls: "gms-handout-label", text: "Items – who takes what" });
+      const list = el.createDiv({ cls: "gms-handout-items" });
+      for (const it of this.loot.items) {
+        const row = list.createDiv({ cls: "gms-handout-item" });
+        const qty = row.createEl("input", { type: "number", cls: "gms-handout-qty", attr: { min: "1", step: "1", "aria-label": "Quantity" } });
+        qty.value = String(it.qty);
+        qty.addEventListener("input", () => (it.qty = Math.max(1, parseInt(qty.value, 10) || 1)));
+        const nameBox = row.createDiv({ cls: "gms-handout-namebox" });
+        const name = nameBox.createEl("input", { type: "text", cls: "gms-handout-name" });
+        name.value = it.name;
+        const meta = nameBox.createDiv({ cls: "gms-handout-meta" });
+        const linked = meta.createSpan({ cls: "gms-handout-link" });
+        const showLink = () => { const n = this.plugin.itemNote(it.name); linked.setText(n ? "linked" : ""); linked.setAttribute("aria-label", n ? `Linked to ${n.path}` : ""); };
+        showLink();
+        if (it.cost) meta.createSpan({ cls: "gms-handout-cost", text: it.cost });
+        name.addEventListener("input", () => (it.name = name.value.trim()));
+        name.addEventListener("change", showLink);
+        const sel = row.createEl("select", { cls: "dropdown gms-handout-to", attr: { "aria-label": `Who takes ${it.name}` } });
+        for (const o of opts) sel.createEl("option", { text: o.label, value: o.key });
+        sel.createEl("option", { text: "— nobody (leave it)", value: "" });
+        sel.value = it.to || "";
+        sel.addEventListener("change", () => (it.to = sel.value));
+      }
+      if (opts.length > 1) {
+        const all = el.createDiv({ cls: "gms-handout-all" });
+        all.createSpan({ text: "Give every item to: " });
+        for (const o of opts) {
+          const b = all.createEl("button", { cls: "gms-handout-chip", text: o.label });
+          b.onclick = () => { this.loot.items.forEach((x) => (x.to = o.key)); this.draw(); };
+        }
+      }
+    }
+
+    /* coins */
+    const c = this.loot.coins;
+    if (COINS.some((k) => c[k])) {
+      el.createDiv({ cls: "gms-handout-label", text: "Coins" });
+      const row = el.createDiv({ cls: "gms-handout-coins" });
+      for (const k of COINS) {
+        const box = row.createDiv({ cls: "gms-handout-coin" });
+        const inp = box.createEl("input", { type: "number", attr: { min: "0", step: "1", "aria-label": k } });
+        inp.value = String(c[k] || 0);
+        inp.addEventListener("input", () => { c[k] = Math.max(0, parseInt(inp.value, 10) || 0); preview(); });
+        box.createSpan({ text: k });
+      }
+      const how = el.createDiv({ cls: "gms-handout-coinmode" });
+      how.createSpan({ text: "Go to: " });
+      const sel = how.createEl("select", { cls: "dropdown" });
+      if (this.party.members.length > 1) sel.createEl("option", { text: "Split evenly between…", value: "split" });
+      for (const o of opts) sel.createEl("option", { text: o.label, value: o.key });
+      sel.value = this.coinMode;
+      sel.addEventListener("change", () => { this.coinMode = sel.value; this.draw(); });
+      const who = el.createDiv({ cls: "gms-handout-split" });
+      const prev = el.createDiv({ cls: "gms-handout-preview" });
+      const preview = () => {
+        prev.empty();
+        if (this.coinMode !== "split") return;
+        const members = this.party.members.filter((m) => this.splitWith.has(m.path));
+        if (!members.length) return prev.setText("Tick at least one character.");
+        const shares = splitCoins(c, members.length);
+        prev.setText(members.map((m, i) => `${m.name}: ${coinText(shares[i]) || "–"}`).join(" · "));
+      };
+      if (this.coinMode === "split") {
+        for (const m of this.party.members) {
+          const lab = who.createEl("label", { cls: "gms-handout-member" });
+          const cb = lab.createEl("input", { type: "checkbox" });
+          cb.checked = this.splitWith.has(m.path);
+          cb.addEventListener("change", () => { if (cb.checked) this.splitWith.add(m.path); else this.splitWith.delete(m.path); preview(); });
+          lab.createSpan({ text: m.name });
+        }
+      }
+      preview();
+    }
+    if (!this.loot.any) el.createDiv({ cls: "setting-item-description", text: "Nothing in this result looks like coins or items." });
+
+    const btns = el.createDiv({ cls: "modal-button-container" });
+    const give = btns.createEl("button", { text: "Give", cls: "mod-cta" });
+    give.onclick = async () => {
+      give.disabled = true;
+      try {
+        const plan = this.plan();
+        if (!plan.length) { give.disabled = false; return new Notice("Nothing to give – pick who takes something."); }
+        const done = await this.plugin.handOutLoot(plan);
+        this.close();
+        if (this.onDone) this.onDone(done);
+      } catch (e) {
+        console.error(e);
+        new Notice(`Couldn't hand out the loot: ${e.message || e}`);
+        give.disabled = false;
+      }
+    };
+    btns.createEl("button", { text: "Cancel" }).onclick = () => this.close();
+  }
+  /** [{ target, items, coins }] – one entry per recipient. */
+  plan() {
+    const byKey = new Map();
+    const opts = this.recipients();
+    const slot = (key) => {
+      const o = opts.find((x) => x.key === key);
+      if (!o) return null;
+      if (!byKey.has(key)) byKey.set(key, { target: o.target, items: [], coins: { pp: 0, gp: 0, ep: 0, sp: 0, cp: 0 } });
+      return byKey.get(key);
+    };
+    for (const it of this.loot.items) {
+      if (!it.to || !it.name) continue;
+      const sl = slot(it.to);
+      if (sl) sl.items.push({ name: it.name, qty: it.qty, cost: it.cost });
+    }
+    const c = this.loot.coins;
+    if (COINS.some((k) => c[k])) {
+      if (this.coinMode === "split") {
+        const members = this.party.members.filter((m) => this.splitWith.has(m.path));
+        splitCoins(c, members.length || 1).forEach((share, i) => {
+          if (!members[i]) return;
+          const sl = slot(members[i].path);
+          for (const k of COINS) sl.coins[k] += share[k];
+        });
+      } else {
+        const sl = slot(this.coinMode);
+        if (sl) for (const k of COINS) sl.coins[k] += c[k];
+      }
+    }
+    return [...byKey.values()].filter((x) => x.items.length || COINS.some((k) => x.coins[k]));
   }
   onClose() { this.contentEl.empty(); }
 }
@@ -2139,12 +3004,6 @@ class GmScreenView extends ItemView {
       nx.createSpan({ cls: "gms-combat-k", text: "Next" });
       nx.createSpan({ cls: "gms-combat-v", text: st.next });
     }
-    const conc = this.plugin.settings.concentration !== false ? (st.combatants || []).filter((c) => (c.conditions || []).some(isConcentration)) : [];
-    if (conc.length) {
-      const cc = bar.createSpan({ cls: "gms-combat-conc", attr: { "aria-label": "Concentrating" } });
-      setIcon(cc.createSpan({ cls: "gms-combat-conc-icon" }), "target");
-      cc.createSpan({ text: conc.map((c) => c.name).join(", ") });
-    }
     bar.createDiv({ cls: "gms-spacer" });
     const btn = (icon, text, label, fn, cls = "") => {
       const b = bar.createEl("button", { cls: `gms-combat-btn ${cls}`.trim(), attr: { "aria-label": label } });
@@ -2251,6 +3110,8 @@ class GmScreenView extends ItemView {
     this.input.addEventListener("keydown", (e) => this.onSearchKey(e));
     this.resultsEl = this.searchBox.createDiv({ cls: "gms-results gms-hidden" });
     this.catRow = el.createDiv({ cls: "gms-cats" });
+    this.sessionChip = el.createEl("button", { cls: "gms-session-chip gms-hidden" });
+    this.sessionChip.onclick = (e) => this.sessionMenu(e);
     const add = el.createEl("button", { cls: "gms-add-btn" });
     setIcon(add.createSpan(), "plus");
     add.createSpan({ text: "Add" });
@@ -2262,6 +3123,33 @@ class GmScreenView extends ItemView {
       await this.plugin.saveSettings();
       this.plugin.views().forEach((v) => v.renderBoard());
     };
+  }
+  /** Toolbar chip: time left of the session, on every screen. */
+  renderSessionChip() {
+    const c = this.sessionChip;
+    if (!c) return;
+    const st = this.plugin.sessionState();
+    c.toggleClass("gms-hidden", !st.started);
+    if (!st.started) return;
+    c.empty();
+    setIcon(c.createSpan({ cls: "gms-session-chip-icon" }), st.running ? "hourglass" : "pause");
+    c.createSpan({ text: st.over ? `+${hm(-st.left)} over` : `${hm(st.left)} left` });
+    c.toggleClass("is-warn", st.warn && !st.over);
+    c.toggleClass("is-over", st.over);
+    c.toggleClass("is-paused", !st.running);
+    c.setAttribute("aria-label", `Session timer – ${st.running ? "running" : "paused"}. Click for options.`);
+  }
+  sessionMenu(e) {
+    const p = this.plugin;
+    const st = p.sessionState();
+    const m = new Menu();
+    m.addItem((it) => it.setTitle(st.running ? "Pause session timer" : st.started ? "Resume session timer" : "Start session timer").setIcon(st.running ? "pause" : "play").onClick(() => p.sessionToggle()));
+    m.addItem((it) => it.setTitle("Add 15 minutes").setIcon("plus").onClick(() => p.sessionAdjust(15)));
+    m.addItem((it) => it.setTitle(`Session length (${durationText(p.settings.session.minutes)})…`).setIcon("timer").onClick(() => p.sessionLengthPrompt()));
+    m.addItem((it) => it.setTitle(`Remind me ${p.settings.session.warn} min before the end…`).setIcon("bell").onClick(() => p.sessionWarnPrompt()));
+    m.addSeparator();
+    m.addItem((it) => it.setTitle("Reset session timer").setIcon("rotate-ccw").onClick(() => p.sessionReset()));
+    m.showAtMouseEvent(e);
   }
   renderLock() {
     if (!this.lockBtn) return;
@@ -2280,6 +3168,9 @@ class GmScreenView extends ItemView {
     m.addItem((it) => it.setTitle("Dice tray").setIcon(TILE_ICONS.dice).onClick(() => this.plugin.addTile({ type: "dice" })));
     m.addItem((it) => it.setTitle("Sticky note").setIcon(TILE_ICONS.sticky).onClick(() => this.plugin.addTile({ type: "sticky" })));
     m.addItem((it) => it.setTitle("Checklist").setIcon(TILE_ICONS.checklist).onClick(() => this.plugin.addTile({ type: "checklist", items: [] })));
+    m.addItem((it) => it.setTitle("Soundboard").setIcon(TILE_ICONS.sound).onClick(() => this.plugin.addTile({ type: "sound", pads: [] })));
+    m.addItem((it) => it.setTitle("Clocks & timers").setIcon(TILE_ICONS.clocks).onClick(() => this.plugin.addTile({ type: "clocks", clocks: "" })));
+    m.addItem((it) => it.setTitle("Random tables").setIcon("table-2").onClick(() => this.plugin.addTile({ type: "tables", tables: this.plugin.starterInstalled() ? clone(STARTER_TABLES) : [], history: [] })));
     m.showAtMouseEvent(e);
   }
 
@@ -2733,6 +3624,7 @@ class GmScreenView extends ItemView {
 
   renderBoard() {
     this.renderLock();
+    this.renderSessionChip();
     this.unloadTiles();
     this.board.empty();
     this.watch = new Set();
@@ -2783,6 +3675,9 @@ class GmScreenView extends ItemView {
     if (t.type === "combat") return "Combat";
     if (t.type === "dice") return "Dice tray";
     if (t.type === "checklist") return "Checklist";
+    if (t.type === "sound") return t.title || "Soundboard";
+    if (t.type === "tables") return t.title || "Random tables";
+    if (t.type === "clocks") return t.title || (t.path ? `Clocks – ${t.path.split("/").pop().replace(/\.md$/, "")}` : "Clocks & timers");
     if (t.type === "sticky") {
       const first = String(t.text || "").split("\n").map((x) => x.trim()).find(Boolean);
       return first ? first.slice(0, 40) : "Sticky note";
@@ -2821,6 +3716,14 @@ class GmScreenView extends ItemView {
       b.addClass("gms-dice-3d");
       b.toggleClass("is-on", on);
     }
+    if (t.type === "clocks" && open) {
+      const ib = this.iconBtn(head, "info", "How to write clocks, counters and timers", () => {
+        const help = el.querySelector(".gms-ck-help");
+        if (help) help.toggleClass("gms-hidden", !help.hasClass("gms-hidden"));
+        ib.toggleClass("is-on", !!help && !help.hasClass("gms-hidden"));
+      });
+      ib.addClass("gms-ck-info");
+    }
     if (t.type === "party" && open) {
       this.iconBtn(head, "user-plus", "Add character", () => this.plugin.pickCharacter(t));
       this.iconBtn(head, "refresh-cw", "Refresh", () => this.renderPartyTiles());
@@ -2857,6 +3760,9 @@ class GmScreenView extends ItemView {
     else if (t.type === "dice") this.renderDiceTray(body, t);
     else if (t.type === "sticky") this.renderSticky(body, t, title);
     else if (t.type === "checklist") this.renderChecklist(body, t);
+    else if (t.type === "sound") this.renderSound(body, t);
+    else if (t.type === "clocks") this.renderClocks(body, t);
+    else if (t.type === "tables") this.renderTables(body, t);
     else {
       body.toggleClass("is-map", t.type === "map");
       const comp = this.addChild(new Component());
@@ -2884,6 +3790,35 @@ class GmScreenView extends ItemView {
       m.addItem((it) => it.setTitle("Done – create session note…").setIcon("check").onClick(() => new NewSessionModal(this.plugin, this.plugin.settings.diary.draft).open()));
       m.addItem((it) => it.setTitle("Add notes to an existing note…").setIcon("file-plus").onClick(() =>
         this.plugin.pickSession((f) => this.plugin.appendNotes(f, this.plugin.settings.diary.draft))));
+    }
+    if (t.type === "tables") {
+      m.addItem((it) => it.setTitle("Add table…").setIcon("plus").onClick(() => this.plugin.pickRandomTable(t)));
+      m.addItem((it) => it.setTitle("Clear results").setIcon("eraser").onClick(() => this.plugin.updateTile(t, { history: [] }, true)));
+      m.addItem((it) => it.setTitle("Open Randomness browser").setIcon("dices").onClick(() => this.app.commands && this.app.commands.executeCommandById("randomness:open-generator-browser")));
+      m.addSeparator();
+    }
+    if (t.type === "clocks") {
+      m.addItem((it) => it.setTitle("Edit clocks as text…").setIcon("pencil").onClick(async () => {
+        const src = this.clockSource(t);
+        const text = await src.read();
+        if (text === null) return;
+        new TextAreaPrompt(this.app, "Clocks", text, (v) => src.change(() => v), "One per line, like in the Tabletop Clocks plugin: \"Alarm 2/6 red\", \"Torches: 6 of 10\", \"Ritual: 0:00 of 10:00\", \"Escape 0/6 vs Guards 0/6\", \"# Heading\".").open();
+      }));
+      m.addItem((it) => it.setTitle("Use clocks from a note…").setIcon("file-clock").onClick(() => this.plugin.pickClockNote(t)));
+      if (t.path) {
+        m.addItem((it) => it.setTitle("Open the note").setIcon("file-symlink").onClick(() => {
+          const f = this.app.vault.getAbstractFileByPath(t.path);
+          if (f instanceof TFile) this.openFile(f, false);
+        }));
+        m.addItem((it) => it.setTitle("Keep clocks on the screen instead").setIcon("unlink").onClick(async () => {
+          const text = await this.clockSource(t).read();
+          this.plugin.updateTile(t, { path: undefined, clockBlock: undefined, clocks: text || "" }, true);
+        }));
+      }
+      m.addSeparator();
+      m.addItem((it) => it.setTitle(t.showSession === false ? "Show session timer" : "Hide session timer").setIcon("hourglass").onClick(() => this.plugin.updateTile(t, { showSession: t.showSession === false }, true)));
+      if (this.plugin.worldTime()) m.addItem((it) => it.setTitle(t.showWorld === false ? "Show in-game time" : "Hide in-game time").setIcon("calendar-clock").onClick(() => this.plugin.updateTile(t, { showWorld: t.showWorld === false }, true)));
+      m.addSeparator();
     }
     if (t.type === "checklist") {
       m.addItem((it) => it.setTitle("Untick everything").setIcon("rotate-ccw").onClick(() => {
@@ -2973,15 +3908,6 @@ class GmScreenView extends ItemView {
     };
     name.addEventListener("mouseover", (e) => this.hover(e, name, d.file.path));
     if (d.subtitle) id.createDiv({ cls: "gms-card-sub", text: d.subtitle });
-    const condField = d.fields.find((f) => f.display === "tags" && /conditions/.test(f.source || ""));
-    const concentrating = this.plugin.settings.concentration !== false && condField && (Array.isArray(condField.value) ? condField.value : String(condField.value || "").split(/,\s*/)).some(isConcentration);
-    if (concentrating) {
-      card.addClass("is-concentrating");
-      const cb = id.createDiv({ cls: "gms-conc-badge", attr: { "aria-label": "Concentrating on a spell" } });
-      setIcon(cb.createSpan(), "target");
-      cb.createSpan({ text: "Concentrating" });
-    }
-    this.plugin.watchConcentration(d, concentrating);
     const fight = this.plugin.combatantFor(d.file, d.name);
     if (fight) {
       const tag = id.createDiv({ cls: "gms-fight" });
@@ -3057,8 +3983,7 @@ class GmScreenView extends ItemView {
   }
 
   renderTags(card, f) {
-    let list = Array.isArray(f.value) ? f.value : f.value ? String(f.value).split(/,\s*/) : [];
-    if (this.plugin.settings.concentration !== false) list = list.filter((x) => !isConcentration(x)); // shown as its own badge
+    const list = Array.isArray(f.value) ? f.value : f.value ? String(f.value).split(/,\s*/) : [];
     if (!list.length) return;
     const row = card.createDiv({ cls: "gms-tags" });
     for (const t of list) {
@@ -3141,6 +4066,633 @@ class GmScreenView extends ItemView {
       list.scrollTop = list.scrollHeight;
     });
     draw();
+  }
+
+  /* ---------------- Random tables ---------------- */
+
+  renderTables(body, t) {
+    body.addClass("gms-tables");
+    const p = this.plugin;
+    if (!Array.isArray(t.tables)) t.tables = [];
+    if (!Array.isArray(t.history)) t.history = [];
+    const api = p.randomness();
+    if (!api) {
+      const e = body.createDiv({ cls: "gms-rt-empty" });
+      e.createDiv({ text: "This tile rolls tables from the Randomness plugin." });
+      e.createDiv({ cls: "setting-item-description", text: "Turn on Randomness in Settings → Community plugins, then come back." });
+      return;
+    }
+    const wrap = body.createDiv({ cls: "gms-rt-wrap" });
+    const listEl = wrap.createDiv({ cls: "gms-rt-list" });
+    const resEl = wrap.createDiv({ cls: "gms-rt-results" });
+
+    const drawResults = () => {
+      resEl.empty();
+      if (!t.history.length) {
+        resEl.createDiv({ cls: "gms-rt-hint", text: "Click a table to roll it. Results stay here." });
+        return;
+      }
+      t.history.forEach((h, i) => {
+        const card = resEl.createDiv({ cls: "gms-rt-result" });
+        card.toggleClass("is-new", i === 0 && Date.now() - (h.at || 0) < 1500);
+        const head = card.createDiv({ cls: "gms-rt-result-head" });
+        head.createSpan({ cls: "gms-rt-result-label", text: h.label });
+        head.createSpan({ cls: "gms-rt-result-time", text: h.at ? moment(h.at).format("HH:mm") : "" });
+        const txt = card.createDiv({ cls: "gms-rt-result-text" });
+        try {
+          txt.appendChild(sanitizeHTMLToDom(String(h.result || "").replace(/; /g, "<br>")));
+        } catch (e) {
+          txt.setText(plainResult(h.result));
+        }
+        if (h.given) card.createDiv({ cls: "gms-rt-given", text: `✓ ${h.given}` });
+        const row = card.createDiv({ cls: "gms-rt-actions" });
+        const again = row.createEl("button", { cls: "gms-rt-act", attr: { "aria-label": "Roll this table again" } });
+        setIcon(again, "refresh-cw");
+        again.onclick = () => roll(t.tables.find((x) => x.id === h.tableId) || { name: h.name, label: h.label, filePath: h.filePath });
+        const copy = row.createEl("button", { cls: "gms-rt-act", attr: { "aria-label": "Copy" } });
+        setIcon(copy, "copy");
+        copy.onclick = async () => {
+          try { await navigator.clipboard.writeText(plainResult(h.result).replace(/; /g, "\n")); new Notice("Copied."); } catch (e) { /* no clipboard */ }
+        };
+        if (p.isLootResult(h, t) && p.party.sheet) {
+          const give = row.createEl("button", { cls: "gms-rt-act gms-rt-give" });
+          setIcon(give.createSpan(), "hand-coins");
+          give.createSpan({ text: "Hand out…" });
+          give.onclick = () => new LootHandoutModal(p, h.result, (who) => {
+            h.given = who;
+            p.saveSoon();
+            drawResults();
+          }).open();
+        }
+        const del = row.createEl("button", { cls: "gms-rt-act gms-rt-del", attr: { "aria-label": "Remove from the list" } });
+        setIcon(del, "x");
+        del.onclick = () => { t.history.splice(i, 1); p.saveSoon(); drawResults(); };
+      });
+    };
+
+    const roll = async (entry) => {
+      const r = await p.rollTable(entry);
+      if (!r) return;
+      t.history.unshift({ tableId: entry.id, name: entry.name, filePath: r.filePath, label: entry.label || entry.name, result: r.result, at: Date.now(), loot: p.isLootEntry(entry) });
+      t.history.length = Math.min(t.history.length, 12);
+      p.saveSoon();
+      drawResults();
+      resEl.scrollTop = 0;
+    };
+
+    // grouped table buttons
+    const groups = new Map();
+    for (const e of t.tables) {
+      const g = e.group || "Tables";
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(e);
+    }
+    for (const [g, entries] of groups) {
+      const sec = listEl.createDiv({ cls: "gms-rt-group" });
+      sec.createDiv({ cls: "gms-rt-group-name", text: g });
+      const btns = sec.createDiv({ cls: "gms-rt-btns" });
+      for (const e of entries) {
+        const b = btns.createEl("button", { cls: "gms-rt-btn", text: e.label || e.name, attr: { "aria-label": `Roll ${e.name}` } });
+        b.onclick = () => roll(e);
+        b.addEventListener("contextmenu", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          this.tableEntryMenu(t, e, ev);
+        });
+      }
+    }
+    const foot = listEl.createDiv({ cls: "gms-rt-foot" });
+    const add = foot.createEl("button", { cls: "gms-rt-add" });
+    setIcon(add.createSpan(), "plus");
+    add.createSpan({ text: "Add table" });
+    add.onclick = () => p.pickRandomTable(t);
+    if (!p.starterInstalled()) {
+      const st = foot.createEl("button", { cls: "gms-rt-add mod-cta" });
+      setIcon(st.createSpan(), "package-plus");
+      st.createSpan({ text: "Install starter tables" });
+      st.setAttribute("aria-label", "Loot, hoards, magic items, gems, art, trinkets, tavern names, NPC quirks, rumours, complications, weather");
+      st.onclick = async () => {
+        if (await p.installStarterTables()) {
+          const have = new Set(t.tables.map((x) => x.name));
+          t.tables.push(...clone(STARTER_TABLES).filter((x) => !have.has(x.name)));
+          p.updateTile(t, {}, true);
+        }
+      };
+    } else if (!t.tables.some((x) => x.starter)) {
+      const st = foot.createEl("button", { cls: "gms-rt-add" });
+      setIcon(st.createSpan(), "list-plus");
+      st.createSpan({ text: "Add the starter tables" });
+      st.onclick = () => { t.tables.push(...clone(STARTER_TABLES)); p.updateTile(t, {}, true); };
+    }
+    drawResults();
+  }
+
+  tableEntryMenu(t, e, ev) {
+    const m = new Menu();
+    const i = t.tables.indexOf(e);
+    m.addItem((it) => it.setTitle("Rename…").setIcon("pencil").onClick(() => new TextPrompt(this.app, "Button name", e.label || e.name, (v) => { e.label = v; this.plugin.updateTile(t, {}, true); }).open()));
+    m.addItem((it) => it.setTitle("Group…").setIcon("folder").onClick(() => new TextPrompt(this.app, "Group (heading it's listed under)", e.group || "", (v) => { e.group = v; this.plugin.updateTile(t, {}, true); }).open()));
+    if (i > 0) m.addItem((it) => it.setTitle("Move up").setIcon("arrow-up").onClick(() => { t.tables.splice(i - 1, 0, t.tables.splice(i, 1)[0]); this.plugin.updateTile(t, {}, true); }));
+    if (i < t.tables.length - 1) m.addItem((it) => it.setTitle("Move down").setIcon("arrow-down").onClick(() => { t.tables.splice(i + 1, 0, t.tables.splice(i, 1)[0]); this.plugin.updateTile(t, {}, true); }));
+    const loot = this.plugin.isLootEntry(e);
+    m.addItem((it) => it.setTitle(loot ? "Results aren't loot (no Hand out…)" : "Results are loot (show Hand out…)").setIcon("hand-coins").onClick(() => { e.loot = !loot; this.plugin.updateTile(t, {}, true); }));
+    const path = e.filePath || this.plugin.starterPath(e.starter);
+    const f = path && this.app.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) m.addItem((it) => it.setTitle("Open the table file").setIcon("file-symlink").onClick(() => this.app.workspace.getLeaf(true).openFile(f)));
+    m.addSeparator();
+    m.addItem((it) => it.setTitle("Remove").setIcon("trash").onClick(() => { t.tables.splice(i, 1); this.plugin.updateTile(t, {}, true); }));
+    m.showAtMouseEvent(ev);
+  }
+
+  /* ---------------- Clocks & timers ---------------- */
+
+  renderClocks(body, t) {
+    body.addClass("gms-clocks");
+    const p = this.plugin;
+    const comp = this.addChild(new Component());
+    this.tileComps.push(comp);
+    const help = body.createDiv({ cls: "gms-ck-help gms-hidden" });
+    const scroll = body.createDiv({ cls: "gms-ck-scroll" });
+    const ticks = []; // redraws every second
+
+    /* --- session timer --- */
+    if (t.showSession !== false) {
+      const box = scroll.createDiv({ cls: "gms-ck-session" });
+      const top = box.createDiv({ cls: "gms-ck-session-top" });
+      top.createSpan({ cls: "gms-ck-label", text: "Session" });
+      const len = top.createEl("button", { cls: "gms-ck-len", attr: { "aria-label": "Set the session length" } });
+      len.onclick = () => p.sessionLengthPrompt();
+      const big = box.createDiv({ cls: "gms-ck-session-time" });
+      const sub = box.createDiv({ cls: "gms-ck-session-sub" });
+      const bar = box.createDiv({ cls: "gms-ck-session-bar" }).createDiv();
+      const row = box.createDiv({ cls: "gms-ck-session-row" });
+      const go = row.createEl("button", { cls: "gms-ck-btn mod-cta" });
+      go.onclick = () => p.sessionToggle();
+      const plus = row.createEl("button", { cls: "gms-ck-btn", text: "+15 min", attr: { "aria-label": "Add 15 minutes to the session" } });
+      plus.onclick = () => p.sessionAdjust(15);
+      const reset = row.createEl("button", { cls: "gms-ck-btn gms-ck-icon", attr: { "aria-label": "Reset the session timer" } });
+      setIcon(reset, "rotate-ccw");
+      reset.onclick = () => p.sessionReset();
+      const bell = row.createEl("button", { cls: "gms-ck-btn gms-ck-icon", attr: { "aria-label": "When to remind you before the end" } });
+      setIcon(bell, "bell");
+      bell.onclick = () => p.sessionWarnPrompt();
+      const draw = () => {
+        const st = p.sessionState();
+        const ss = p.settings.session;
+        len.setText(durationText(ss.minutes));
+        big.setText(st.over ? `+${hms(-st.left)}` : hms(st.left));
+        if (!st.started) sub.setText(`Reminder ${ss.warn} min before the end`);
+        else if (st.over) sub.setText("Over time");
+        else if (st.running) sub.setText(`Ends at ${moment(Date.now() + st.left).format("HH:mm")} · reminder ${ss.warn} min before`);
+        else sub.setText(`Paused · ${hm(st.elapsed)} played`);
+        bar.style.width = `${Math.min(100, (st.elapsed / Math.max(1, ss.minutes * 60000)) * 100)}%`;
+        go.empty();
+        setIcon(go.createSpan(), st.running ? "pause" : "play");
+        go.createSpan({ text: st.running ? "Pause" : st.started ? "Resume" : "Start" });
+        box.toggleClass("is-running", st.running);
+        box.toggleClass("is-warn", st.warn && !st.over);
+        box.toggleClass("is-over", st.over);
+      };
+      draw();
+      ticks.push(draw);
+    }
+
+    /* --- in-game time (TTRPG Tools – Time) --- */
+    if (t.showWorld !== false) {
+      const box = scroll.createDiv({ cls: "gms-ck-world" });
+      const draw = () => {
+        const w = p.worldTime();
+        box.toggleClass("gms-hidden", !w);
+        if (!w) return;
+        const key = `${w.date}|${w.time}`;
+        if (box.dataset.key === key) return;
+        box.dataset.key = key;
+        box.empty();
+        const head = box.createDiv({ cls: "gms-ck-world-head" });
+        setIcon(head.createSpan({ cls: "gms-ck-world-icon" }), "calendar-clock");
+        const when = head.createDiv({ cls: "gms-ck-world-when" });
+        when.createDiv({ cls: "gms-ck-world-date", text: w.date });
+        if (w.time) when.createDiv({ cls: "gms-ck-world-time", text: w.time });
+        const open = head.createEl("button", { cls: "gms-ck-btn gms-ck-icon", attr: { "aria-label": "Open the calendar's control pane" } });
+        setIcon(open, "external-link");
+        open.onclick = () => this.app.commands && this.app.commands.executeCommandById("ttrpg-tools-time:open-control-pane");
+        if (w.hasTime && w.buttons.length) {
+          const row = box.createDiv({ cls: "gms-ck-world-btns" });
+          for (const b of w.buttons) {
+            const btn = row.createEl("button", { cls: "gms-ck-chip", text: b.label || `+${b.hours ? `${b.hours} h` : `${b.minutes} min`}` });
+            btn.onclick = async () => {
+              await w.tt.advanceFantasyClock(b.hours || 0, b.minutes || 0);
+              draw();
+            };
+          }
+        }
+      };
+      draw();
+      let n = 0;
+      ticks.push(() => { if (++n % 3 === 0) draw(); });
+    }
+
+    /* --- clocks, counters, stopwatches --- */
+    const clocksEl = scroll.createDiv({ cls: "gms-ck-grid-wrap" });
+    const src = this.clockSource(t);
+    let clockTicks = [];
+    ticks.push(() => clockTicks.forEach((f) => f()));
+    const drawClocks = async () => {
+      const text = await src.read();
+      clockTicks = [];
+      clocksEl.empty();
+      if (text === null) {
+        clocksEl.createDiv({ cls: "gms-ck-empty", text: `No clocks block found in ${t.path}. Use the tile menu to pick another note.` });
+        return;
+      }
+      this.drawClockItems(clocksEl, t, src, text, clockTicks);
+    };
+    body._gmsRedraw = drawClocks;
+    drawClocks();
+    src.onChange(comp, drawClocks);
+
+    const foot = body.createDiv({ cls: "gms-ck-foot" });
+    const input = foot.createEl("input", { type: "text", cls: "gms-ck-add", attr: { placeholder: "Alarm 0/6 red · Torches: 6 · Ritual: 0:00 of 10:00", spellcheck: "false" } });
+    input.addEventListener("pointerdown", (e) => e.stopPropagation());
+    const addBtn = foot.createEl("button", { cls: "gms-ck-btn mod-cta", text: "Add" });
+    const add = async () => {
+      const v = input.value;
+      if (!v.trim()) return;
+      if (await src.change((x) => ckAdd(x, v, p.clockSize()))) input.value = "";
+    };
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); add(); }
+    });
+    addBtn.onclick = add;
+
+    // Cheat sheet (ⓘ in the title bar). Click an example to put it in the add box.
+    help.createDiv({ cls: "gms-ck-help-title", text: "Type one per line into the box at the bottom (or several separated by ;)" });
+    const rows = [
+      ["Alarm 0/6", "Progress clock with 6 segments (2–12). Click a segment or +/− to tick."],
+      ["Alarm 0/6 red", "Add a colour: red, orange, yellow, green, cyan, blue, purple, pink."],
+      ["Alarm", "No number → empty clock with the default size."],
+      ["Escape 0/6 vs Guards 0/6", "Race: two clocks side by side, the first full one wins."],
+      ["Torches: 6", "Counter you can raise or lower."],
+      ["Torches: 6 of 10", "Counter with a maximum and a bar."],
+      ["Ritual: 0:00", "Stopwatch – counts up while running."],
+      ["Ritual: 0:00 of 10:00", "Countdown – shows time left, says when time's up."],
+      ["# Heist", "Heading to group what follows."],
+      ["[[Guards]] 0/4", "Link a note in the name."],
+    ];
+    const tbl = help.createDiv({ cls: "gms-ck-help-rows" });
+    for (const [ex, desc] of rows) {
+      const r = tbl.createDiv({ cls: "gms-ck-help-row" });
+      const code = r.createEl("code", { cls: "gms-ck-help-ex", text: ex, attr: { "aria-label": "Put this in the add box" } });
+      code.onclick = () => { input.value = input.value.trim() ? `${input.value.trim()}; ${ex}` : ex; input.focus(); };
+      r.createDiv({ cls: "gms-ck-help-desc", text: desc });
+    }
+    help.createDiv({ cls: "gms-ck-help-foot", text: "× on a clock removes it. Tile menu (⋯) → Edit clocks as text… to change everything at once, or Use clocks from a note… to tick a clocks block that lives in a note." });
+
+    comp.register(p.subscribeTick(() => ticks.forEach((f) => f())));
+  }
+
+  /** Where a clocks tile keeps its text: in the tile itself, or a ```clocks block in a note. */
+  clockSource(t) {
+    const p = this.plugin;
+    if (!t.path) {
+      return {
+        key: (name) => `tile:${t.id}\n${name}`,
+        read: async () => t.clocks || "",
+        change: async (fn) => {
+          t.clocks = fn(t.clocks || "");
+          p.saveSoon();
+          p.views().forEach((v) => v.refreshClockTiles(t));
+          return true;
+        },
+        onChange: () => {},
+      };
+    }
+    const n = t.clockBlock || 0;
+    const file = () => this.app.vault.getAbstractFileByPath(t.path);
+    return {
+      key: (name) => `${t.path}\n${name}`,
+      sourcePath: t.path,
+      read: async () => {
+        const f = file();
+        if (!(f instanceof TFile)) return null;
+        const b = findClockBlocks(await this.app.vault.read(f))[n];
+        return b ? b.body : null;
+      },
+      change: async (fn) => {
+        const f = file();
+        if (!(f instanceof TFile)) return false;
+        let ok = false;
+        await this.app.vault.process(f, (md) => {
+          const next = replaceClockBlock(md, n, fn);
+          if (next === null) return md;
+          ok = true;
+          return next;
+        });
+        if (!ok) new Notice(`Couldn't find the clocks in ${t.path}.`);
+        return ok;
+      },
+      onChange: (comp, redraw) => {
+        comp.registerEvent(this.app.vault.on("modify", (f) => { if (f.path === t.path) redraw(); }));
+      },
+    };
+  }
+
+  refreshClockTiles(t) {
+    for (const el of this.board ? this.board.querySelectorAll(".gms-tile-body.gms-clocks") : []) {
+      if (el.dataset.tileId === t.id && el._gmsRedraw) el._gmsRedraw();
+    }
+  }
+
+  drawClockItems(el, t, src, text, ticks) {
+    const p = this.plugin;
+    const def = p.clockSize();
+    const items = parseClocks(text, def);
+    let grid = null;
+    const g = () => (grid = grid || el.createDiv({ cls: "gms-ck-grid" }));
+    const notify = (name, extra) => {
+      if (src.sourcePath) this.app.workspace.trigger(extra.event, { sourcePath: src.sourcePath, name, ...extra.data });
+    };
+    const menu = (e, index, label, part) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const m = new Menu();
+      m.addItem((it) => it.setTitle(`Remove ${label}`).setIcon("trash").onClick(() => src.change((x) => ckRemovePart(x, index, part))));
+      m.showAtMouseEvent(e);
+    };
+    const nameEl = (box, item) => {
+      const n = box.createDiv({ cls: "gms-ck-name" });
+      if (item.link) {
+        const a = n.createEl("a", { cls: "internal-link", text: item.name });
+        a.onclick = (e) => { e.preventDefault(); this.app.workspace.openLinkText(item.link, src.sourcePath || ""); };
+      } else n.setText(item.name);
+    };
+    const color = (box, c) => { if (c) box.addClass(`gms-ck-${c}`); };
+    const removeBtn = (box, index, part, name) => {
+      const x = box.createEl("button", { cls: "gms-ck-del", attr: { "aria-label": `Remove ${name}` } });
+      setIcon(x, "x");
+      x.onclick = (e) => {
+        e.stopPropagation();
+        src.change((txt) => ckRemovePart(txt, index, part));
+      };
+    };
+
+    const clock = (parent, index, c) => {
+      const box = parent.createDiv({ cls: "gms-ck-item gms-ck-clock" });
+      removeBtn(box, index, c.part, `"${c.name}"`);
+      color(box, c.color);
+      const full = c.filled >= c.size;
+      box.toggleClass("is-full", full);
+      const svg = box.createSvg("svg", { cls: "gms-ck-face", attr: { viewBox: "0 0 100 100", role: "slider", "aria-label": c.name, "aria-valuenow": c.filled, "aria-valuemax": c.size } });
+      svg.createSvg("circle", { cls: "gms-ck-rim", attr: { cx: 50, cy: 50, r: 48 } });
+      const gap = c.size > 8 ? 3 : 4;
+      for (let k = 0; k < c.size; k++) {
+        const a0 = -90 + (k * 360) / c.size + gap / 2;
+        const a1 = -90 + ((k + 1) * 360) / c.size - gap / 2;
+        const pt = (deg) => { const r = (deg * Math.PI) / 180; return `${(50 + 44 * Math.cos(r)).toFixed(2)} ${(50 + 44 * Math.sin(r)).toFixed(2)}`; };
+        const seg = svg.createSvg("path", { cls: "gms-ck-seg", attr: { d: `M 50 50 L ${pt(a0)} A 44 44 0 ${a1 - a0 > 180 ? 1 : 0} 1 ${pt(a1)} Z` } });
+        if (k < c.filled) seg.classList.add("is-filled"); // one class per call – Obsidian's createSvg won't take "a b"
+        seg.addEventListener("click", () => setFill(k + 1 === c.filled ? k : k + 1));
+      }
+      svg.createSvg("circle", { cls: "gms-ck-hub", attr: { cx: 50, cy: 50, r: 7 } });
+      nameEl(box, c);
+      const row = box.createDiv({ cls: "gms-ck-row" });
+      const minus = row.createEl("button", { cls: "gms-ck-step", text: "−", attr: { "aria-label": `Clear a segment of ${c.name}` } });
+      row.createSpan({ cls: "gms-ck-count", text: full ? "Full" : `${c.filled}/${c.size}` });
+      const plusB = row.createEl("button", { cls: "gms-ck-step", text: "+", attr: { "aria-label": `Tick ${c.name}` } });
+      const setFill = async (n) => {
+        n = ckClamp(n, 0, c.size);
+        if (n === c.filled && c.written) return;
+        if (!(await src.change((x) => ckSetFill(x, index, c.part, n, def)))) return;
+        notify(c.name, { event: "tabletop-clocks:change", data: { link: c.link, filled: n, previous: c.filled, size: c.size, full: n >= c.size } });
+        if (n >= c.size && c.filled < c.size) new Notice(`${c.name} is full.`);
+      };
+      minus.onclick = () => setFill(c.filled - 1);
+      plusB.onclick = () => setFill(c.filled + 1);
+      box.addEventListener("contextmenu", (e) => menu(e, index, `"${c.name}"`, c.part));
+      return box;
+    };
+
+    for (const it of items) {
+      if (it.kind === "heading") {
+        const h = el.createDiv({ cls: "gms-ck-heading" });
+        setIcon(h.createSpan(), "clock");
+        h.createSpan({ text: it.text });
+        removeBtn(h, it.index, undefined, `heading "${it.text}"`);
+        grid = null;
+        continue;
+      }
+      if (it.kind === "clocks") {
+        if (it.clocks.length === 2) {
+          const race = g().createDiv({ cls: "gms-ck-race" });
+          const a = clock(race, it.index, it.clocks[0]);
+          race.createDiv({ cls: "gms-ck-vs", text: "vs" });
+          const b = clock(race, it.index, it.clocks[1]);
+          const fa = it.clocks[0].filled >= it.clocks[0].size;
+          const fb = it.clocks[1].filled >= it.clocks[1].size;
+          if (fa !== fb) (fa ? b : a).addClass("is-lost");
+        } else clock(g(), it.index, it.clocks[0]);
+        continue;
+      }
+      if (it.kind === "counter") {
+        const c = it.counter;
+        const box = g().createDiv({ cls: "gms-ck-item gms-ck-counter" });
+        color(box, c.color);
+        const val = box.createDiv({ cls: "gms-ck-value" });
+        val.createSpan({ text: String(c.value) });
+        if (c.max !== undefined) {
+          val.createSpan({ cls: "gms-ck-of", text: ` / ${c.max}` });
+          box.createDiv({ cls: "gms-ck-meter" }).createDiv().style.width = `${c.max ? (Math.max(0, c.value) / c.max) * 100 : 0}%`;
+        }
+        nameEl(box, c);
+        const row = box.createDiv({ cls: "gms-ck-row" });
+        const set = async (v) => {
+          if (c.max !== undefined) v = ckClamp(v, 0, c.max);
+          if (v === c.value) return;
+          if (await src.change((x) => ckSetValue(x, it.index, v))) notify(c.name, { event: "tabletop-clocks:count", data: { link: c.link, value: v, previous: c.value, max: c.max } });
+        };
+        row.createEl("button", { cls: "gms-ck-step", text: "−", attr: { "aria-label": `One less ${c.name}` } }).onclick = () => set(c.value - 1);
+        row.createEl("button", { cls: "gms-ck-step", text: "+", attr: { "aria-label": `One more ${c.name}` } }).onclick = () => set(c.value + 1);
+        box.addEventListener("contextmenu", (e) => menu(e, it.index, `"${c.name}"`));
+        removeBtn(box, it.index, undefined, `"${c.name}"`);
+        continue;
+      }
+      if (it.kind === "stopwatch") {
+        const w = it.stopwatch;
+        const key = src.key(w.name);
+        const box = g().createDiv({ cls: "gms-ck-item gms-ck-stopwatch" });
+        color(box, w.color);
+        const val = box.createDiv({ cls: "gms-ck-value gms-ck-time" });
+        const meter = w.limit ? box.createDiv({ cls: "gms-ck-meter" }).createDiv() : null;
+        nameEl(box, w);
+        const row = box.createDiv({ cls: "gms-ck-row" });
+        const go = row.createEl("button", { cls: "gms-ck-step" });
+        const rs = row.createEl("button", { cls: "gms-ck-step", attr: { "aria-label": `Reset ${w.name}` } });
+        setIcon(rs, "rotate-ccw");
+        const started = () => p.clockRunning(key);
+        const now = () => {
+          const st = started();
+          const sec = w.seconds + (st === undefined ? 0 : Math.max(0, Date.now() - st) / 1000);
+          return w.limit !== undefined ? Math.min(sec, w.limit) : sec;
+        };
+        const save = async (sec, run) => {
+          await p.setClockRunning(key, run ? Date.now() : null);
+          const v = Math.floor(sec);
+          if (v !== w.seconds) await src.change((x) => ckSetValue(x, it.index, v));
+          else this.plugin.views().forEach((vw) => vw.refreshClockTiles(t));
+          notify(w.name, { event: "tabletop-clocks:stopwatch", data: { link: w.link, seconds: v, running: run, limit: w.limit } });
+        };
+        const draw = () => {
+          const sec = now();
+          val.setText(w.limit !== undefined ? `${ckTime(w.limit - sec)}` : ckTime(sec));
+          if (meter) meter.style.width = `${(sec / w.limit) * 100}%`;
+          const full = w.limit !== undefined && sec >= w.limit;
+          const run = started() !== undefined;
+          box.toggleClass("is-full", full);
+          box.toggleClass("is-running", run && !full);
+          go.empty();
+          setIcon(go, run && !full ? "pause" : "play");
+          go.setAttribute("aria-label", `${run ? "Pause" : "Start"} ${w.name}`);
+          if (full && run) p.clockTimeUp(key, w.name);
+        };
+        go.onclick = () => {
+          if (started() !== undefined) save(now(), false);
+          else if (w.limit === undefined || w.seconds < w.limit) save(w.seconds, true);
+        };
+        rs.onclick = () => save(0, false);
+        box.addEventListener("contextmenu", (e) => menu(e, it.index, `"${w.name}"`));
+        removeBtn(box, it.index, undefined, `"${w.name}"`);
+        box.title = w.limit !== undefined ? `Counts down from ${ckTime(w.limit)}` : "Stopwatch";
+        draw();
+        ticks.push(draw);
+      }
+    }
+    if (!items.some((x) => x.kind !== "heading")) {
+      el.createDiv({ cls: "gms-ck-empty", text: "No clocks yet. Type one below, e.g. \"Alarm 0/6 red\", \"Torches: 6 of 10\", \"Ritual: 0:00 of 10:00\" (a countdown), or \"Escape 0/6 vs Guards 0/6\"." });
+    }
+  }
+
+  /* ---------------- Soundboard ---------------- */
+
+  renderSound(body, t) {
+    body.addClass("gms-sound");
+    if (!Array.isArray(t.pads)) t.pads = [];
+    const sb = this.plugin.sound;
+    const grid = body.createDiv({ cls: "gms-sb-grid" });
+    const els = new Map();
+    const paint = (id) => {
+      for (const [pid, r] of els) {
+        if (id && id !== pid) continue;
+        const st = sb.state(pid);
+        r.el.toggleClass("is-playing", !!st && !st.stopping);
+        r.el.toggleClass("is-stopping", !!st && st.stopping);
+        r.now.setText(st && (st.count > 1 || (r.pad.src && r.pad.src.type === "folder")) ? st.track : "");
+        r.bar.style.width = `${Math.round((st ? st.progress : 0) * 1000) / 10}%`;
+      }
+    };
+    t.pads.forEach((pad, i) => {
+      const kind = padKind(pad);
+      const el = grid.createEl("button", { cls: `gms-sb-pad gms-sb-${kind}`, attr: { "aria-label": `${pad.label || "Sound"} – ${PAD_KINDS[kind].label}. Click to play or stop, right-click for options.` } });
+      el.style.setProperty("--gms-pad", PAD_COLORS[pad.color] || PAD_COLORS[PAD_KINDS[kind].color]);
+      setIcon(el.createDiv({ cls: "gms-sb-icon" }), pad.icon || PAD_KINDS[kind].icon);
+      el.createDiv({ cls: "gms-sb-label", text: pad.label || "Sound" });
+      const now = el.createDiv({ cls: "gms-sb-now" });
+      const badges = el.createDiv({ cls: "gms-sb-badges" });
+      if (pad.src && pad.src.type === "folder" && pad.order === "shuffle") setIcon(badges.createSpan(), "shuffle");
+      if (padLoops(pad)) setIcon(badges.createSpan(), "repeat");
+      const bar = el.createDiv({ cls: "gms-sb-progress" }).createDiv();
+      el.addEventListener("click", () => sb.toggle(pad));
+      el.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.padMenu(t, pad, i, e);
+      });
+      els.set(pad.id, { el, now, bar, pad });
+    });
+    const add = grid.createEl("button", { cls: "gms-sb-pad gms-sb-add", attr: { "aria-label": "Add a sound button (or drop an audio file / folder here)" } });
+    setIcon(add.createDiv({ cls: "gms-sb-icon" }), "plus");
+    add.createDiv({ cls: "gms-sb-label", text: "Add sound" });
+    add.onclick = () => new SoundPadModal(this.plugin, null, (pad) => {
+      t.pads.push(pad);
+      this.plugin.updateTile(t, {}, true);
+    }).open();
+
+    const foot = body.createDiv({ cls: "gms-sb-foot" });
+    setIcon(foot.createSpan({ cls: "gms-sb-vol-icon" }), "volume-2");
+    const vol = foot.createEl("input", { type: "range", cls: "gms-sb-vol", attr: { min: "0", max: "100", step: "1", "aria-label": "Volume for all sounds" } });
+    vol.value = String(this.plugin.settings.sound.volume);
+    vol.addEventListener("pointerdown", (e) => e.stopPropagation());
+    vol.addEventListener("input", () => {
+      this.plugin.settings.sound.volume = Number(vol.value);
+      sb.refreshVolumes();
+      this.plugin.saveSoon();
+    });
+    const stop = foot.createEl("button", { cls: "gms-sb-stop", attr: { "aria-label": "Stop all sounds (fades out)" } });
+    setIcon(stop.createSpan(), "square");
+    stop.createSpan({ text: "Stop all" });
+    stop.onclick = () => sb.stopAll();
+
+    // Drop audio files / folders from the file explorer straight onto the board
+    body.addEventListener("dragover", (e) => {
+      const d = this.app.dragManager && this.app.dragManager.draggable;
+      if (!d || !d.file) return;
+      e.preventDefault();
+      body.addClass("is-drop");
+    });
+    body.addEventListener("dragleave", () => body.removeClass("is-drop"));
+    body.addEventListener("drop", (e) => {
+      body.removeClass("is-drop");
+      const d = this.app.dragManager && this.app.dragManager.draggable;
+      const f = d && d.file;
+      if (!f) return;
+      e.preventDefault();
+      const pad = this.plugin.padFromFile(f);
+      if (!pad) return new Notice("Drop an audio file or a folder with audio files.");
+      t.pads.push(pad);
+      this.plugin.updateTile(t, {}, true);
+    });
+
+    paint();
+    const comp = this.addChild(new Component());
+    this.tileComps.push(comp);
+    comp.register(sb.subscribe(paint));
+  }
+
+  padMenu(t, pad, i, e) {
+    const sb = this.plugin.sound;
+    const st = sb.state(pad.id);
+    const m = new Menu();
+    if (st && !st.stopping) {
+      m.addItem((it) => it.setTitle("Stop").setIcon("square").onClick(() => sb.stop(pad.id)));
+      if (st.count > 1) m.addItem((it) => it.setTitle("Next track").setIcon("skip-forward").onClick(() => sb.next(pad.id)));
+      m.addSeparator();
+    }
+    m.addItem((it) => it.setTitle("Edit…").setIcon("pencil").onClick(() => new SoundPadModal(this.plugin, pad, (next) => {
+      Object.keys(pad).forEach((k) => delete pad[k]);
+      Object.assign(pad, next);
+      sb.updated(pad);
+      this.plugin.updateTile(t, {}, true);
+    }, () => this.removePad(t, pad)).open()));
+    if (i > 0) m.addItem((it) => it.setTitle("Move left").setIcon("arrow-left").onClick(() => {
+      t.pads.splice(i - 1, 0, t.pads.splice(i, 1)[0]);
+      this.plugin.updateTile(t, {}, true);
+    }));
+    if (i < t.pads.length - 1) m.addItem((it) => it.setTitle("Move right").setIcon("arrow-right").onClick(() => {
+      t.pads.splice(i + 1, 0, t.pads.splice(i, 1)[0]);
+      this.plugin.updateTile(t, {}, true);
+    }));
+    m.addItem((it) => it.setTitle("Duplicate").setIcon("copy").onClick(() => {
+      t.pads.splice(i + 1, 0, { ...clone(pad), id: uid() });
+      this.plugin.updateTile(t, {}, true);
+    }));
+    m.addSeparator();
+    m.addItem((it) => it.setTitle("Remove").setIcon("trash").onClick(() => this.removePad(t, pad)));
+    m.showAtMouseEvent(e);
+  }
+
+  removePad(t, pad) {
+    this.plugin.sound.stop(pad.id, true);
+    this.plugin.updateTile(t, { pads: t.pads.filter((x) => x !== pad) }, true);
   }
 
   /* ---------------- Sticky note ---------------- */
@@ -3405,6 +4957,7 @@ class GmScreenPlugin extends Plugin {
     this.addRibbonIcon("shield", "Open Game Master Interactive Screen", () => this.activate());
 
     this.addCommand({ id: "open", name: "Open Game Master Interactive Screen", callback: () => this.activate() });
+    this.addCommand({ id: "sound-stop-all", name: "Soundboard: stop all sounds", callback: () => this.sound.stopAll() });
     this.addCommand({
       id: "focus-search",
       name: "Search from Game Master Interactive Screen",
@@ -3444,6 +4997,7 @@ class GmScreenPlugin extends Plugin {
       },
     });
     this.cards = new RollCards();
+    this.sound = new SoundBoard(this);
     // The character sheet opens its "Jump to…" menu on <body>; when it came from a note on the screen, keep it in that popup/tile
     this.registerDomEvent(document, "pointerdown", (e) => {
       const host = e.target && e.target.closest && e.target.closest(".gms-note-host");
@@ -3466,7 +5020,9 @@ class GmScreenPlugin extends Plugin {
     this.registerDomEvent(document, "click", (e) => {
       const el = e.target && e.target.closest && e.target.closest(".dice-roller");
       if (!el) return;
-      this.lastDiceClick = { t: Date.now(), label: guessRollLabel(el), ctx: rollContext(el, (x) => this.noteOfElement(x)) };
+      const ctx = rollContext(el, (x) => this.noteOfElement(x));
+      this.spellRollKind(ctx);
+      this.lastDiceClick = { t: Date.now(), label: guessRollLabel(el), ctx };
       this.placeDiceRenderer();
     }, true);
     this.registerEvent(this.app.workspace.on("dice-roller:new-result", (roller) => {
@@ -3528,12 +5084,15 @@ class GmScreenPlugin extends Plugin {
     // Roll for Initiative may load after us, or be turned on later
     this.registerEvent(this.app.workspace.on("roll-initiative:change", (st) => this.onCombatChange(st)));
     this.registerInterval(window.setInterval(() => this.connectInitiative(), 10000));
+    this.registerInterval(window.setInterval(() => this.tick(), 1000));
+    this.addCommand({ id: "session-toggle", name: "Session timer: start / pause", callback: () => this.sessionToggle() });
   }
 
   onunload() {
     const ri = this.ri();
     if (ri && this.rollerHook && typeof ri.setRoller === "function") ri.setRoller(null);
     if (this.cards) this.cards.destroy();
+    if (this.sound) this.sound.stopAll(true);
     if (this.responsive) this.responsive.destroy();
     if (this.menuObserver) this.menuObserver.disconnect();
     document.body.removeClass("gms-dice-in-tray");
@@ -3570,73 +5129,10 @@ class GmScreenPlugin extends Plugin {
     this.rollerHook = null;
   }
   onCombatChange(st) {
-    // Concentrating creatures that just lost HP (incl. temp HP) → concentration check
-    if (st && st.running && !st.ended && this.settings.concentration !== false && Array.isArray(st.combatants)) {
-      const prev = this.combatHp || {};
-      const now = {};
-      for (const c of st.combatants) {
-        const key = `${st.sourcePath}|${c.name}`;
-        const hp = (Number(c.hp) || 0) + (Number(c.temp) || 0);
-        now[key] = hp;
-        if (prev[key] !== undefined && hp < prev[key] && (c.conditions || []).some(isConcentration)) {
-          const file = c.link ? this.app.metadataCache.getFirstLinkpathDest(String(c.link).replace(/\.md$/, ""), "") : null;
-          this.concentrationCheck({ name: c.name, file, damage: prev[key] - hp });
-        }
-      }
-      this.combatHp = now;
-    } else if (!st || st.ended) this.combatHp = {};
     this.combatState = st || null;
     this.views().forEach((v) => {
       v.renderCombatBar();
       v.renderPartySoon();
-    });
-  }
-  /** Party cards outside a fight: HP drop on a concentrating character → concentration check. */
-  watchConcentration(d, concentrating) {
-    const bar = d.fields.find((f) => f.display === "bar" && f.value);
-    if (!bar) return;
-    const hp = (Number(bar.value.cur) || 0) + (Number(bar.value.temp) || 0);
-    this.partyHp = this.partyHp || {};
-    const prev = this.partyHp[d.file.path];
-    this.partyHp[d.file.path] = hp;
-    if (concentrating && prev !== undefined && hp < prev) this.concentrationCheck({ name: d.name, file: d.file, damage: prev - hp });
-  }
-  /** CON save bonus: the sheet's saves list, a statblock's saves, or its CON score. */
-  conSave(file) {
-    if (!(file instanceof TFile)) return 0;
-    const fm = (this.app.metadataCache.getFileCache(file) || {}).frontmatter || {};
-    if (this.party.sheet || fm.data_id) {
-      const ab = this.party.companion(file, fm, "Abilities");
-      const sv = Array.isArray(ab.saves_list) ? ab.saves_list.find((x) => /^con/i.test(String(x.ability || ""))) : null;
-      if (sv && toInt(sv.mod) !== undefined) return toInt(sv.mod);
-      if (toInt(ab.con_mod) !== undefined && fm.data_id) return toInt(ab.con_mod);
-    }
-    const saves = fm.saves;
-    if (Array.isArray(saves)) {
-      for (const o of saves) if (o && typeof o === "object") for (const [k, v] of Object.entries(o)) if (/^con/i.test(k) && toInt(v) !== undefined) return toInt(v);
-    } else if (saves && typeof saves === "object") {
-      for (const [k, v] of Object.entries(saves)) if (/^con/i.test(k) && toInt(v) !== undefined) return toInt(v);
-    }
-    if (Array.isArray(fm.stats) && toInt(fm.stats[2]) !== undefined) return Math.floor((toInt(fm.stats[2]) - 10) / 2);
-    return 0;
-  }
-  concentrationCheck({ name, file, damage }) {
-    if (this.settings.concentration === false || !(damage > 0)) return;
-    const key = `${name}|${damage}`;
-    const now = Date.now();
-    this.concSeen = (this.concSeen || []).filter((x) => now - x.t < 3000);
-    if (this.concSeen.some((x) => x.key === key)) return; // same hit seen from the fight and from the sheet
-    this.concSeen.push({ key, t: now });
-    const dc = concentrationDC(damage);
-    const mod = this.conSave(file);
-    this.cards.showConcentration({
-      name, damage, dc, mod,
-      roll: () => this.rollInTray(`1d20${mod >= 0 ? "+" : ""}${mod}`, "Concentration save", null, (r) => {
-        const kept = r.total >= dc;
-        r.who = name;
-        r.what = `Concentration save vs DC ${dc}: ${kept ? "keeps concentration" : "loses concentration"}`;
-        r.outcome = kept ? "pass" : "fail";
-      }),
     });
   }
   /** The party card's place in the running fight, if any. */
@@ -3905,6 +5401,8 @@ class GmScreenPlugin extends Plugin {
     s.diary = Object.assign(clone(DEFAULT_SETTINGS.diary), data.diary || {});
     s.combat = Object.assign(clone(DEFAULT_SETTINGS.combat), data.combat || {});
     s.dice = Object.assign(clone(DEFAULT_SETTINGS.dice), data.dice || {});
+    s.sound = Object.assign(clone(DEFAULT_SETTINGS.sound), data.sound || {});
+    s.session = Object.assign(clone(DEFAULT_SETTINGS.session), data.session || {});
     if (!Array.isArray(s.screens) || !s.screens.length) {
       // First run, or moving over from the sidebar version (party + pins)
       const tiles = [];
@@ -3989,6 +5487,395 @@ class GmScreenPlugin extends Plugin {
     await this.saveSettings();
     this.refreshViews();
   }
+  /* ----- one-second tick for timers ----- */
+  subscribeTick(fn) {
+    this.tickSubs = this.tickSubs || new Set();
+    this.tickSubs.add(fn);
+    return () => this.tickSubs.delete(fn);
+  }
+  tick() {
+    this.sessionCheck();
+    this.views().forEach((v) => v.renderSessionChip());
+    for (const fn of [...(this.tickSubs || [])]) {
+      try { fn(); } catch (e) { console.error(e); }
+    }
+  }
+
+  /* ----- session timer ----- */
+  sessionState() {
+    const ss = this.settings.session;
+    const running = !!ss.startedAt;
+    const elapsed = (Number(ss.elapsed) || 0) + (running ? Math.max(0, Date.now() - ss.startedAt) : 0);
+    const left = (Number(ss.minutes) || 0) * 60000 - elapsed;
+    return { running, started: running || elapsed > 0, elapsed, left, warn: left <= (Number(ss.warn) || 0) * 60000, over: left <= 0 };
+  }
+  sessionCheck() {
+    const ss = this.settings.session;
+    if (!ss.startedAt) return;
+    const st = this.sessionState();
+    if (!ss.warned && st.warn && !st.over && ss.warn > 0) {
+      ss.warned = true;
+      this.saveSoon();
+      this.sessionAlert("warn", `${hm(st.left).replace(/^0:/, "")} minutes of the session left.`);
+    }
+    if (!ss.over && st.over) {
+      ss.over = true;
+      ss.warned = true;
+      this.saveSoon();
+      this.sessionAlert("over", "Session time is up.");
+    }
+  }
+  sessionAlert(tone, text) {
+    new Notice(`⏳ ${text}`, 15000);
+    this.cards.showMessage({ title: "Session timer", text, tone });
+    if (this.settings.session.chime !== false) this.chime(tone === "over" ? 3 : 2);
+  }
+  /** A soft two-tone chime (no audio file needed). */
+  chime(times = 2) {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = this.chimeCtx || (this.chimeCtx = new Ctx());
+      const t0 = ctx.currentTime + 0.02;
+      for (let i = 0; i < times; i++) {
+        for (const [f, d] of [[880, 0], [1320, 0.16]]) {
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = "sine";
+          o.frequency.value = f;
+          const s = t0 + i * 0.6 + d;
+          g.gain.setValueAtTime(0, s);
+          g.gain.linearRampToValueAtTime(0.18 * this.sound.master(), s + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0001, s + 0.5);
+          o.connect(g).connect(ctx.destination);
+          o.start(s);
+          o.stop(s + 0.55);
+        }
+      }
+    } catch (e) { /* no audio */ }
+  }
+  sessionChanged() {
+    this.saveSoon();
+    this.tick();
+  }
+  sessionToggle() {
+    const ss = this.settings.session;
+    if (ss.startedAt) {
+      ss.elapsed = (Number(ss.elapsed) || 0) + Math.max(0, Date.now() - ss.startedAt);
+      ss.startedAt = null;
+    } else {
+      ss.startedAt = Date.now();
+      const st = this.sessionState();
+      ss.warned = st.warn; // starting with less than the reminder time left: no reminder
+      ss.over = st.over;
+    }
+    this.sessionChanged();
+  }
+  sessionReset() {
+    Object.assign(this.settings.session, { startedAt: null, elapsed: 0, warned: false, over: false });
+    this.sessionChanged();
+  }
+  sessionAdjust(min) {
+    const ss = this.settings.session;
+    ss.minutes = Math.max(1, (Number(ss.minutes) || 0) + min);
+    const st = this.sessionState();
+    ss.warned = st.warn;
+    ss.over = st.over;
+    this.sessionChanged();
+  }
+  sessionLengthPrompt() {
+    const ss = this.settings.session;
+    new TextPrompt(this.app, "How long is the session? (e.g. 4 h, 3:30, 210 min)", durationText(ss.minutes).replace(" min", "m").replace(" h", "h"), (v) => {
+      const m = parseDuration(v);
+      if (!m) return new Notice("Couldn't read that. Try 4 h, 3:30 or 210 min.");
+      ss.minutes = m;
+      const st = this.sessionState();
+      ss.warned = st.warn;
+      ss.over = st.over;
+      this.sessionChanged();
+    }, "Set").open();
+  }
+  sessionWarnPrompt() {
+    const ss = this.settings.session;
+    new TextPrompt(this.app, "Remind me how many minutes before the end?", String(ss.warn), (v) => {
+      const m = parseDuration(/^\d+$/.test(v.trim()) ? `${v}m` : v);
+      if (m === null) return new Notice("Type a number of minutes, e.g. 30.");
+      ss.warn = m;
+      ss.warned = this.sessionState().warn;
+      this.sessionChanged();
+    }, "Set").open();
+  }
+
+  /* ----- TTRPG Tools – Time ----- */
+  worldTime() {
+    const tt = this.app.plugins && this.app.plugins.plugins && this.app.plugins.plugins["ttrpg-tools-time"];
+    const cal = tt && tt.activeCalendar;
+    if (!cal || !cal.definition || !cal.state) return null;
+    const def = cal.definition;
+    const d = cal.state.todayDate || {};
+    const month = Array.isArray(def.months) ? def.months[d.monthIndex] : null;
+    const mName = month ? month.name : `Month ${(d.monthIndex || 0) + 1}`;
+    const date = month && month.days === 1 ? `${mName} ${d.year}` : `${d.day}. ${mName} ${d.year}`;
+    let clock = null;
+    try { clock = def.time && def.time.enabled && typeof tt.getFantasyClock === "function" ? tt.getFantasyClock(cal) : null; } catch (e) { clock = null; }
+    const time = clock ? `${String(clock.hour).padStart(2, "0")}:${String(clock.minute).padStart(2, "0")}` : "";
+    let buttons = [];
+    try { buttons = typeof tt.getConfiguredTimeAdvanceButtons === "function" ? tt.getConfiguredTimeAdvanceButtons() : []; } catch (e) { buttons = []; }
+    buttons = buttons.slice().sort((a, b) => ((a.hours || 0) * 60 + (a.minutes || 0)) - ((b.hours || 0) * 60 + (b.minutes || 0)));
+    return { tt, cal, date, time, hasTime: !!clock && typeof tt.advanceFantasyClock === "function", buttons };
+  }
+
+  /* ----- clocks ----- */
+  tabletopClocks() {
+    return this.app.plugins && this.app.plugins.plugins ? this.app.plugins.plugins["tabletop-clocks"] : null;
+  }
+  clockSize() {
+    const tc = this.tabletopClocks();
+    const n = tc && tc.settings ? parseInt(tc.settings.size, 10) : NaN;
+    return Number.isFinite(n) ? Math.max(2, Math.min(12, n)) : 4;
+  }
+  /** Running stopwatches: note clocks share Tabletop Clocks' own record, screen clocks keep theirs here. */
+  clockRunning(key) {
+    const tc = this.tabletopClocks();
+    if (!key.startsWith("tile:") && tc && tc.settings && tc.settings.running) return tc.settings.running[key];
+    return (this.settings.clockRunning || {})[key];
+  }
+  async setClockRunning(key, ts) {
+    const tc = this.tabletopClocks();
+    this.clockDone = this.clockDone || new Set();
+    this.clockDone.delete(key);
+    if (!key.startsWith("tile:") && tc && typeof tc.setRunning === "function") return tc.setRunning(key, ts);
+    const r = { ...(this.settings.clockRunning || {}) };
+    if (ts === null) delete r[key];
+    else r[key] = ts;
+    this.settings.clockRunning = r;
+    this.saveSoon();
+  }
+  clockTimeUp(key, name) {
+    this.clockDone = this.clockDone || new Set();
+    if (this.clockDone.has(key)) return;
+    this.clockDone.add(key);
+    new Notice(`${name}: time's up.`);
+    this.cards.showMessage({ title: name, text: "Time's up.", tone: "over" });
+    if (this.settings.session.chime !== false) this.chime(1);
+  }
+  async pickClockNote(t) {
+    const files = this.app.vault.getMarkdownFiles();
+    const found = [];
+    await Promise.all(files.map(async (f) => {
+      try {
+        const md = await this.app.vault.cachedRead(f);
+        if (!/clocks/.test(md)) return;
+        findClockBlocks(md).forEach((b, i) => found.push({ file: f, index: i, first: (b.body.split("\n").find((l) => l.trim()) || "").trim() }));
+      } catch (e) { /* skip */ }
+    }));
+    if (!found.length) return new Notice("No note has a ```clocks block yet. Tabletop Clocks: \"Insert clocks\" adds one.");
+    found.sort((a, b) => a.file.path.localeCompare(b.file.path) || a.index - b.index);
+    new ListPicker(this.app, found, (x) => `${x.file.path.replace(/\.md$/, "")}${x.index ? ` (block ${x.index + 1})` : ""} — ${x.first}`, (x) => {
+      this.updateTile(t, { path: x.file.path, clockBlock: x.index }, true);
+    }, "Pick a note with clocks").open();
+  }
+
+  /** A sheet spell roll without a type: read healing / the damage type from the spell note. */
+  spellRollKind(ctx) {
+    if (!ctx || ctx.damageType || (ctx.kind !== "Damage" && ctx.kind !== "Healing")) return ctx;
+    const target = String(ctx.link || ctx.action || "").replace(/\.md$/, "").trim();
+    if (!target) return ctx;
+    const f = this.app.metadataCache.getFirstLinkpathDest(target, ctx.whoPath || "");
+    if (!(f instanceof TFile)) return ctx;
+    const fm = (this.app.metadataCache.getFileCache(f) || {}).frontmatter || {};
+    const sp = spellEffectKind(fm["Damage / Effect"] ?? fm["Damage/Effect"] ?? fm.damage_effect);
+    if (sp) Object.assign(ctx, sp);
+    return ctx;
+  }
+
+  /* ----- Randomness ----- */
+  randomness() {
+    const r = this.app.plugins && this.app.plugins.plugins && this.app.plugins.plugins.randomness;
+    return r && r.api && typeof r.api.rollUnscoped === "function" ? r.api : null;
+  }
+  starterFolder() {
+    const r = this.app.plugins && this.app.plugins.plugins && this.app.plugins.plugins.randomness;
+    const root = String((r && r.settings && r.settings.generatorRoot) || "").replace(/^\/+|\/+$/g, "");
+    return normalizePath(root ? `${root}/${STARTER_FOLDER}` : STARTER_FOLDER);
+  }
+  starterPath(file) { return file ? normalizePath(`${this.starterFolder()}/${file}`) : null; }
+  starterInstalled() { return Object.keys(STARTER_FILES).every((f) => this.app.vault.getAbstractFileByPath(this.starterPath(f)) instanceof TFile); }
+  async installStarterTables() {
+    const folder = this.starterFolder();
+    try {
+      if (!this.app.vault.getAbstractFileByPath(folder)) await this.app.vault.createFolder(folder);
+      let made = 0;
+      for (const [name, text] of Object.entries(STARTER_FILES)) {
+        const path = this.starterPath(name);
+        if (this.app.vault.getAbstractFileByPath(path)) continue; // never overwrite the GM's edits
+        await this.app.vault.create(path, text);
+        made++;
+      }
+      new Notice(made ? `Starter tables saved in ${folder}. Edit them like any Randomness file.` : `Starter tables are already in ${folder}.`);
+      return true;
+    } catch (e) {
+      console.error(e);
+      new Notice(`Couldn't save the starter tables: ${e.message || e}`);
+      return false;
+    }
+  }
+  /** Roll one table entry → { result, filePath } (null + notice on failure). */
+  async rollTable(entry) {
+    const api = this.randomness();
+    if (!api) { new Notice("The Randomness plugin isn't on."); return null; }
+    const filePath = entry.filePath || (entry.starter ? this.starterPath(entry.starter) : undefined);
+    const opts = filePath && this.app.vault.getAbstractFileByPath(filePath) ? { filePath } : {};
+    try {
+      const r = await api.rollUnscoped(entry.name, opts);
+      if (!r || r.error) {
+        new Notice(`Couldn't roll ${entry.label || entry.name}: ${(r && r.error) || "no result"}`);
+        return null;
+      }
+      return { result: r.result, filePath: r.source || filePath };
+    } catch (e) {
+      new Notice(`Couldn't roll ${entry.label || entry.name}: ${e.message || e}`);
+      return null;
+    }
+  }
+  async pickRandomTable(t) {
+    const api = this.randomness();
+    if (!api) return new Notice("The Randomness plugin isn't on.");
+    let list = [];
+    try { list = await api.tablesWithSources(); } catch (e) { list = []; }
+    if (!list.length) return new Notice("Randomness has no tables yet. Install the starter tables or create a generator file.");
+    new ListPicker(this.app, list, (x) => `${x.name} — ${x.source || x.filePath || ""}`, (x) => {
+      t.tables = t.tables || [];
+      t.tables.push({ id: uid(), group: x.source || "Tables", label: x.name.replace(/([a-z])([A-Z])/g, "$1 $2"), name: x.name, filePath: x.filePath });
+      this.updateTile(t, {}, true);
+    }, "Pick a Randomness table").open();
+  }
+
+  /* ----- loot handout (One DnD Character Sheet inventory) ----- */
+  /** Starter loot tables are loot; other tables only when the GM says so (or by default when they look like it). */
+  isLootEntry(e) {
+    if (!e) return null;
+    if (typeof e.loot === "boolean") return e.loot;
+    if (e.starter) return e.starter === "GM Screen Loot.rdm";
+    return null;
+  }
+  isLootResult(h, t) {
+    const e = (t && t.tables || []).find((x) => x.id === h.tableId);
+    const flag = e ? this.isLootEntry(e) : typeof h.loot === "boolean" ? h.loot : null;
+    if (flag !== null) return flag && parseLoot(h.result).any;
+    const L = parseLoot(h.result);
+    return COINS.some((k) => L.coins[k]) || L.items.some((x) => x.cost);
+  }
+  /** A character note → hand-out target (its sheet Inventory companion). */
+  lootMember(f) {
+    const fm = this.party.fm(f);
+    const name = fm[this.settings.nameKey] || fm.character_name || f.basename;
+    return { kind: "character", label: name, name, file: f, path: this.party.companionPath(f, fm, "Inventory") };
+  }
+  /** Parties to hand loot to: the sheet's party groups (with their shared inventory), or the GM screen's party. */
+  lootParties() {
+    const out = [];
+    for (const g of this.party.sheetGroups()) {
+      if (!g || !g.name) continue;
+      const seen = new Set();
+      const members = (g.members || []).map((m) => this.party.resolveNote(m)).filter((f) => f && !seen.has(f.path) && seen.add(f.path)).map((f) => this.lootMember(f));
+      out.push({ name: g.name, members, inventory: { kind: "party", label: `Party inventory (${g.name})`, name: g.name, path: normalizePath(`${this.party.dataFolder}/_Party/${slugParty(g.name)}/Inventory.md`) } });
+    }
+    if (!out.length) {
+      const members = this.party.members(null).map((f) => this.lootMember(f));
+      if (members.length) out.push({ name: "Party", members, inventory: null });
+    }
+    return out;
+  }
+  /** The party picked in the GM screen settings, when it's a sheet party group. */
+  defaultLootParty(parties) {
+    const pt = this.settings.party || {};
+    const i = pt.mode === "sheetGroup" ? parties.findIndex((x) => x.name === String(pt.value || "").trim()) : -1;
+    return i >= 0 ? i : 0;
+  }
+  /** An item note (#Item) with this name, for item_link / cost / weight. */
+  itemNote(name) {
+    const n = String(name || "").trim().toLowerCase();
+    if (!n) return null;
+    this.itemIndex = this.itemIndex && Date.now() - this.itemIndex.at < 30000 ? this.itemIndex : { at: Date.now(), map: null };
+    if (!this.itemIndex.map) {
+      const map = new Map();
+      for (const f of this.app.vault.getMarkdownFiles()) {
+        const c = this.app.metadataCache.getFileCache(f);
+        if (!c) continue;
+        const tags = (getAllTags(c) || []).map((x) => x.toLowerCase());
+        if (!tags.some((x) => x === "#item" || x.startsWith("#item/"))) continue;
+        map.set(itemKey(f.basename), f);
+      }
+      this.itemIndex.map = map;
+    }
+    return this.itemIndex.map.get(itemKey(n)) || null;
+  }
+  async ensureInventory(target) {
+    let f = this.app.vault.getAbstractFileByPath(target.path);
+    if (f instanceof TFile) return f;
+    const folder = target.path.split("/").slice(0, -1).join("/");
+    if (folder && !this.app.vault.getAbstractFileByPath(folder)) {
+      try { await this.app.vault.createFolder(folder); } catch (e) { /* made meanwhile */ }
+    }
+    const head = target.kind === "party" ? `party_name: ${JSON.stringify(target.name)}\n` : "";
+    try {
+      f = await this.app.vault.create(target.path, `---\ncssclasses:\n  - dnd-sheet\n${head}inventory_list: []\ncurrency:\n  pp: 0\n  gp: 0\n  ep: 0\n  sp: 0\n  cp: 0\n---\n`);
+    } catch (e) {
+      f = this.app.vault.getAbstractFileByPath(target.path);
+    }
+    if (!(f instanceof TFile)) throw new Error(`no inventory file at ${target.path}`);
+    return f;
+  }
+  async giveTo(target, items, coins) {
+    const f = await this.ensureInventory(target);
+    await this.app.fileManager.processFrontMatter(f, (fm) => {
+      if (!Array.isArray(fm.inventory_list)) fm.inventory_list = [];
+      for (const it of items || []) {
+        const note = this.itemNote(it.name);
+        const nfm = note ? this.party.fm(note) : {};
+        const linkText = note ? this.app.metadataCache.fileToLinktext(note, f.path) : "";
+        fm.inventory_list.push({
+          id: invId(),
+          name: it.name,
+          weight: nfm.weight_lb !== undefined && nfm.weight_lb !== null ? nfm.weight_lb : "",
+          qty: it.qty || 1,
+          cost: it.cost || (nfm.cost !== undefined && nfm.cost !== null ? String(nfm.cost) : ""),
+          equipped: false,
+          item_link: note ? `[[${linkText}]]` : "",
+        });
+      }
+      if (coins && COINS.some((k) => coins[k])) {
+        const cur = fm.currency && typeof fm.currency === "object" ? fm.currency : {};
+        const next = {};
+        for (const k of COINS) next[k] = (Number(cur[k]) || 0) + (coins[k] || 0);
+        fm.currency = next;
+      }
+    });
+  }
+  /** Carry out a hand-out plan [{ target, items, coins }]. Returns a short "who got it" line. */
+  async handOutLoot(plan) {
+    const said = [];
+    for (const p of plan) {
+      await this.giveTo(p.target, p.items, p.coins);
+      const bits = [];
+      if (p.items.length) bits.push(p.items.map((x) => (x.qty > 1 ? `${x.qty}× ${x.name}` : x.name)).join(", "));
+      if (COINS.some((k) => p.coins[k])) bits.push(coinText(p.coins));
+      said.push(`${p.target.kind === "party" ? `Party (${p.target.name})` : p.target.name}: ${bits.join(" + ")}`);
+    }
+    new Notice(`Handed out – ${said.join(" · ")}`);
+    return plan.map((p) => (p.target.kind === "party" ? "Party" : p.target.name)).join(", ");
+  }
+
+  /** A ready sound button for a dropped audio file or folder (null if it holds no audio). */
+  padFromFile(f) {
+    if (isAudio(f)) return { id: uid(), label: f.basename, kind: "effect", src: { type: "file", path: f.path }, order: "order", volume: 80 };
+    if (f instanceof TFolder) {
+      const pad = { id: uid(), label: f.name, kind: "music", src: { type: "folder", path: f.path }, order: "shuffle", volume: 80 };
+      return this.sound.tracks(pad).length ? pad : null;
+    }
+    return null;
+  }
   async saveTemplate(sc, name) {
     const s = this.settings;
     s.templates = s.templates || [];
@@ -4045,7 +5932,7 @@ class GmScreenPlugin extends Plugin {
     const view = this.views()[0];
     const width = (view && view.boardWrap && view.boardWrap.clientWidth) || 1000;
     const tile = { id: uid(), x: 0, y: 0, w: size.ew || size.w, h: size.h, cw: Math.min(size.w, 240), expanded: false };
-    for (const k of ["type", "path", "heading", "level", "mapIndex", "mapId", "mapLine", "blockId", "title", "text", "color", "items"]) if (spec[k] !== undefined) tile[k] = spec[k];
+    for (const k of ["type", "path", "heading", "level", "mapIndex", "mapId", "mapLine", "blockId", "title", "text", "color", "items", "pads", "clocks", "clockBlock", "tables", "history"]) if (spec[k] !== undefined) tile[k] = spec[k];
     const box = tileBox(tile);
     Object.assign(tile, freeSpot(sc.tiles, box.w, box.h, width));
     sc.tiles.push(tile);
@@ -4506,12 +6393,36 @@ class GmScreenSettingTab extends PluginSettingTab {
         else this.plugin.unhookInitiative();
       }));
 
+    /* Session timer */
+    new Setting(el).setName("Session timer").setHeading();
+    new Setting(el)
+      .setName("Session length")
+      .setDesc("How long you plan to play, e.g. 4 h, 3:30 or 210 min.")
+      .addText((t) => t.setValue(durationText(s.session.minutes)).onChange(async (v) => {
+        const m = parseDuration(v);
+        if (m) { s.session.minutes = m; await this.save(false); }
+      }));
+    new Setting(el)
+      .setName("Reminder")
+      .setDesc("Minutes before the end when you get a reminder (0 = only when time is up).")
+      .addText((t) => t.setValue(String(s.session.warn)).onChange(async (v) => {
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n) && n >= 0) { s.session.warn = n; await this.save(false); }
+      }));
+    new Setting(el)
+      .setName("Chime")
+      .setDesc("Play a short chime with the reminder and when a timer runs out.")
+      .addToggle((t) => t.setValue(s.session.chime !== false).onChange(async (v) => { s.session.chime = v; await this.save(false); }));
+
+    /* Soundboard */
+    new Setting(el).setName("Soundboard").setHeading();
+    new Setting(el)
+      .setName("Fade")
+      .setDesc("How long music and ambience take to fade in and out (seconds). 0 = cut straight away.")
+      .addSlider((sl) => sl.setLimits(0, 5, 0.5).setValue((s.sound.fade || 0) / 1000).setDynamicTooltip().onChange(async (v) => { s.sound.fade = Math.round(v * 1000); await this.save(false); }));
+
     /* Combat */
     new Setting(el).setName("Combat").setHeading();
-    new Setting(el)
-      .setName("Concentration checks")
-      .setDesc("When a concentrating character or creature takes damage, a card shows the Constitution save DC with a button to roll it. Concentrating characters are marked on party cards and in the combat bar.")
-      .addToggle((t) => t.setValue(s.concentration !== false).onChange(async (v) => { s.concentration = v; await this.save(); }));
     new Setting(el)
       .setName("Combat bar")
       .setDesc("While a Roll for Initiative fight is running, a bar under the search shows the round, whose turn it is and who's next, with turn buttons. Party cards highlight whose turn it is.")
@@ -4566,5 +6477,5 @@ module.exports = GmScreenPlugin;
 module.exports.__test = {
   norm, scoreEntry, computeSlots, stripLink, getPath, flattenValues, toInt, PRESETS,
   parseFormula, rollFormula, withAdvantage, critOf, breakdown, resultFromDiceRoller, visualDice, SHAPES, DiceStage,
-  ResponsiveNotes, rollContext, rollWhat, snapResize, screenToJson, screenFromJson, concentrationDC, isConcentration, insertNotes, spellcasting, findInitiativeBlock, combatBlock, extractSection, findMapBlocks, mapMarkdown, pickMap, cleanHeading, fillTokens, lastSessionNumber, padNum, cleanFileName, freeSpot, tileBox, isOpenTile, snapToTiles,
+  PartyReader, ResponsiveNotes, rollContext, rollWhat, snapResize, screenToJson, screenFromJson, SoundBoard, SoundPadModal, padKind, padLoops, isAudio, spellEffectKind, parseLoot, splitCoins, plainResult, slugParty, STARTER_TABLES, STARTER_FILES, LootHandoutModal, parseClocks, ckRemovePart, ckSetFill, ckSetValue, ckAdd, findClockBlocks, replaceClockBlock, parseDuration, hms, hm, insertNotes, spellcasting, findInitiativeBlock, combatBlock, extractSection, findMapBlocks, mapMarkdown, pickMap, cleanHeading, fillTokens, lastSessionNumber, padNum, cleanFileName, freeSpot, tileBox, isOpenTile, snapToTiles,
 };
