@@ -146,6 +146,10 @@ plugin.registerEvent(app.workspace.on("game-master-screen:rolled", (r) => {
 
 ---
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## Credits
 
 Thanks to the authors of the plugins this screen works with: Jeremy Valentine (Dice Roller, Fantasy Statblocks), Jareika (TTRPG Tools – Maps, Time and Player Screen), Bananafest Destiny (Tabletop Clocks) and Josh (Randomness). None of their code is bundled. See [CREDITS.md](CREDITS.md).
