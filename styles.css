@@ -3142,3 +3142,29 @@ body.gms-narrow-note .gms-note-host .mobile-nav-menu-overlay .mobile-nav-menu-sh
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
 }
+
+/* ================= Picture maps (plain images) ================= */
+.gms-render.gms-picture {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  background: var(--background-secondary);
+}
+
+.gms-render.gms-picture.is-panning {
+  cursor: grabbing;
+}
+
+.gms-render.gms-picture img {
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: none;
+  max-height: none;
+  transform-origin: 0 0;
+  user-select: none;
+  pointer-events: none;
+}

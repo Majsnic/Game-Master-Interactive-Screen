@@ -577,6 +577,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const TILE_SIZES = {
   note: { w: 220, h: 360, ew: 440 },
   section: { w: 240, h: 320, ew: 440 },
+  part: { w: 240, h: 300, ew: 420 },
   map: { w: 220, h: 440, ew: 600 },
   party: { w: 560, h: 330 },
   combat: { w: 240, h: 520, ew: 520 },
@@ -588,7 +589,7 @@ const TILE_SIZES = {
   tables: { w: 460, h: 520 },
   diary: { w: 440, h: 440 },
 };
-const TILE_ICONS = { note: "file-text", section: "heading", map: "map", party: "users", diary: "notebook-pen", combat: "swords", dice: "dices", sticky: "sticky-note", checklist: "list-checks", sound: "audio-lines", clocks: "hourglass", tables: "dices" };
+const TILE_ICONS = { note: "file-text", section: "heading", part: "text-select", map: "map", party: "users", diary: "notebook-pen", combat: "swords", dice: "dices", sticky: "sticky-note", checklist: "list-checks", sound: "audio-lines", clocks: "hourglass", tables: "dices" };
 const ALWAYS_OPEN = ["party", "diary", "combat", "dice", "sticky", "checklist", "sound", "clocks", "tables"];
 const STICKY_COLORS = { yellow: "Yellow", pink: "Pink", blue: "Blue", green: "Green", orange: "Orange" };
 const STICKY_SIZES = { s: ["Small", 0.8], m: ["Medium", 1], l: ["Large", 1.3], xl: ["Extra large", 1.7] }; // shown open unless shrunk
@@ -617,6 +618,101 @@ function frontmatterEnd(lines) {
   if (lines[0] !== "---") return 0;
   for (let i = 1; i < lines.length; i++) if (lines[i] === "---" || lines[i] === "...") return i + 1;
   return 0;
+}
+
+/**
+ * The pieces of a note you can put on the screen on their own, in order:
+ * headings, blocks with a ^id, callouts, statblocks, pictures and maps.
+ */
+function noteParts(text) {
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  const out = [];
+  const counts = {};
+  let fence = null;
+  let fenceStart = -1;
+  for (let i = frontmatterEnd(lines); i < lines.length; i++) {
+    const raw = lines[i];
+    const d = quoteDepth(raw);
+    const line = stripQuotes(raw, d);
+    if (fence) {
+      if (line.trim().startsWith(fence.mark) && !line.trim().replace(/[`~]/g, "")) {
+        if (fence.lang === "statblock") {
+          const body = lines.slice(fenceStart + 1, i).map((l) => stripQuotes(l, d)).join("\n");
+          const nm = /^\s*name:\s*["']?(.+?)["']?\s*$/m.exec(body) || /^\s*monster:\s*["']?(.+?)["']?\s*$/m.exec(body);
+          counts.statblock = (counts.statblock || 0) + 1;
+          out.push({ kind: "statblock", index: counts.statblock - 1, name: nm ? nm[1].trim() : `Statblock ${counts.statblock}`, line: fenceStart });
+        }
+        fence = null;
+      }
+      continue;
+    }
+    const fm = /^\s*(`{3,}|~{3,})\s*([\w-]*)/.exec(line);
+    if (fm) {
+      fence = { mark: fm[1], lang: fm[2].toLowerCase() };
+      fenceStart = i;
+      if (fence.lang === "zoommap") { counts.map = (counts.map || 0) + 1; out.push({ kind: "map", index: counts.map - 1, line: i }); }
+      continue;
+    }
+    const h = d === 0 && /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+    if (h) { out.push({ kind: "heading", heading: cleanHeading(h[2]), level: h[1].length, line: i }); continue; }
+    const c = /^\[!([^\]\s|]+)[^\]]*\][+-]?\s*(.*)$/.exec(line.trim());
+    if (c && d >= 1 && (i === 0 || quoteDepth(lines[i - 1]) < d || !stripQuotes(lines[i - 1], d).trim())) {
+      counts.callout = (counts.callout || 0) + 1;
+      out.push({ kind: "callout", index: counts.callout - 1, type: c[1].toLowerCase(), title: cleanHeading(c[2].replace(/<br\s*\/?>/gi, " — ").replace(/<[^>]+>/g, "")) || c[1].charAt(0).toUpperCase() + c[1].slice(1), depth: d, line: i });
+    }
+    const b = /(?:^|\s)\^([A-Za-z0-9-]+)\s*$/.exec(line);
+    if (b) {
+      const own = !line.replace(/\^[A-Za-z0-9-]+\s*$/, "").trim();
+      let pv = own ? "" : line.replace(/\s*\^[A-Za-z0-9-]+\s*$/, "");
+      if (own) for (let j = i - 1; j >= 0 && !pv; j--) pv = stripQuotes(lines[j], quoteDepth(lines[j])).trim();
+      out.push({ kind: "block", id: b[1], preview: cleanHeading(pv.replace(/^\s*([-*+]|\d+\.)\s+/, "").replace(/^\|/, "")).slice(0, 60), line: i });
+    }
+    for (const m of line.matchAll(/!\[\[([^\]|#]+?\.(?:png|jpe?g|webp|gif|svg|avif|bmp))(?:[|#][^\]]*)?\]\]|!\[[^\]]*\]\(([^)\s]+?\.(?:png|jpe?g|webp|gif|svg|avif|bmp))\)/gi)) {
+      const target = decodeURI(m[1] || m[2]);
+      if (!out.some((x) => x.kind === "image" && x.target === target)) out.push({ kind: "image", target, line: i });
+    }
+  }
+  return out;
+}
+/** The markdown of one part (block / callout / statblock); null when it's gone. */
+function notePartMarkdown(text, part) {
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  const parts = noteParts(text);
+  const same = parts.filter((x) => x.kind === part.kind);
+  let hit = null;
+  if (part.kind === "block") hit = same.find((x) => x.id === part.ref);
+  else if (part.kind === "statblock" || part.kind === "callout") {
+    const key = part.kind === "statblock" ? "name" : "title";
+    hit = same.find((x) => x[key] === part.ref) || same[part.index || 0] || null;
+  }
+  if (!hit) return null;
+  const at = hit.line;
+  const d = quoteDepth(lines[at]);
+  const bare = (k) => stripQuotes(lines[k], d);
+  if (part.kind === "statblock") {
+    let j = at + 1;
+    while (j < lines.length && !/^\s*(`{3,}|~{3,})\s*$/.test(bare(j))) j++;
+    return lines.slice(at, j + 1).map((l, k) => bare(at + k)).join("\n");
+  }
+  if (part.kind === "callout") {
+    let j = at + 1;
+    while (j < lines.length && quoteDepth(lines[j]) >= d && stripQuotes(lines[j], d - 1).trim()) j++;
+    return lines.slice(at, j).map((l) => stripQuotes(l, d - 1)).join("\n");
+  }
+  // block: the line with the id (a list item / single line), or the paragraph / table above a lone ^id
+  const own = !bare(at).replace(/\^[A-Za-z0-9-]+\s*$/, "").trim();
+  let from = at;
+  let to = at;
+  if (own) {
+    to = at - 1;
+    while (to >= 0 && !bare(to).trim()) to--;
+    from = to;
+    while (from > 0 && bare(from - 1).trim() && !/^#{1,6}\s/.test(bare(from - 1))) from--;
+  } else if (!/^\s*([-*+]|\d+\.)\s/.test(bare(at))) {
+    while (from > 0 && bare(from - 1).trim() && !/^#{1,6}\s/.test(bare(from - 1)) && !/^\s*([-*+]|\d+\.)\s/.test(bare(from - 1))) from--;
+  }
+  if (to < from) return null;
+  return lines.slice(from, to + 1).map((l, k) => bare(from + k)).join("\n").replace(/\s*\^[A-Za-z0-9-]+\s*$/, "");
 }
 
 /**
@@ -656,6 +752,36 @@ function extractSection(text, heading, level) {
   if (start < 0) return null;
   const md = lines.slice(start, end).map((l) => stripQuotes(l, depth)).join("\n").replace(/\s+$/, "");
   return { md, startLine: start };
+}
+
+const IMAGE_EXT = ["png", "jpg", "jpeg", "webp", "gif", "svg", "avif", "bmp"];
+const isImage = (f) => f instanceof TFile && IMAGE_EXT.includes(String(f.extension || "").toLowerCase());
+/** Where TTRPG Tools - Maps keeps an image's markers: "map.png.markers.json" or "map.markers.json". */
+function markersCandidates(imagePath) {
+  const p = String(imagePath || "");
+  const dot = p.lastIndexOf(".");
+  const base = dot > p.lastIndexOf("/") ? p.slice(0, dot) : p;
+  return [`${p}.markers.json`, `${base}.markers.json`];
+}
+/** The map image a markers.json belongs to (its active / first base). */
+function imageFromMarkers(json) {
+  let o = json;
+  try { if (typeof o === "string") o = JSON.parse(o); } catch (e) { return null; }
+  if (!o || typeof o !== "object") return null;
+  const pathOf = (b) => (typeof b === "string" ? b : b && typeof b === "object" ? b.path || b.image || null : null);
+  return pathOf(o.activeBase) || (Array.isArray(o.bases) && o.bases.map(pathOf).find(Boolean)) || pathOf(o.image) || null;
+}
+/** A zoommap block for an image + markers file, filling its tile. */
+function imageMapMarkdown(id, image, markers) {
+  return "```zoommap\n" + [
+    `id: ${JSON.stringify(id)}`,
+    `image: ${JSON.stringify(image)}`,
+    `markers: ${JSON.stringify(markers)}`,
+    "width: 100%",
+    "height: 100%",
+    "resizable: false",
+    "responsive: false",
+  ].join("\n") + "\n```";
 }
 
 /** Every ```zoommap block in a note, in order: { start, end, yaml, id }. */
@@ -1751,6 +1877,31 @@ class TextAreaPrompt extends Modal {
   onClose() { this.contentEl.empty(); }
 }
 
+/** "What do you want from this note?" – the whole note or one part of it. */
+class NotePartPicker extends FuzzySuggestModal {
+  constructor(plugin, file, parts) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.file = file;
+    this.parts = [{ kind: "note" }, ...parts];
+    this.setPlaceholder(`Add from ${file.basename}: the whole note, a heading, a block, a picture, a statblock…`);
+  }
+  getItems() { return this.parts; }
+  getItemText(x) {
+    switch (x.kind) {
+      case "note": return `📄 Whole note`;
+      case "heading": return `${"  ".repeat(Math.max(0, x.level - 1))}# ${x.heading}`;
+      case "block": return `¶ ^${x.id}${x.preview ? ` — ${x.preview}` : ""}`;
+      case "callout": return `${"   ".repeat(Math.max(0, (x.depth || 1) - 1))}💬 ${x.title}  (${x.type})`;
+      case "statblock": return `🐉 Statblock: ${x.name}`;
+      case "image": return `🖼 Picture: ${x.target.split("/").pop()}`;
+      case "map": return `🗺 Map ${x.index + 1}`;
+      default: return x.kind;
+    }
+  }
+  onChooseItem(x) { this.plugin.addNotePart(this.file, x); }
+}
+
 class ListPicker extends FuzzySuggestModal {
   constructor(app, items, text, onPick, placeholder) {
     super(app);
@@ -2086,8 +2237,70 @@ const STARTER_TABLES = [
 
 const COINS = ["pp", "gp", "ep", "sp", "cp"];
 /** HTML/markdown result → plain text. */
+/** "dungeonOrigin" → "Dungeon origin", "LootHoardCR0to4" → "Loot hoard CR0to4". */
+function humanizeTable(name) {
+  const s = String(name || "").replace(/^__note:[^^]*\^/, "").replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").trim();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1).replace(/ ([A-Z])(?=[a-z])/g, (m, c) => ` ${c.toLowerCase()}`) : s;
+}
+/**
+ * Randomness tables defined inside a note:
+ *  - a markdown lookup table followed by a "^blockId" line (named after the heading above it);
+ *  - "Table: Name" in a ```randomness codeblock (with that block's "Prompt:" lines).
+ */
+function noteTablesIn(md) {
+  const out = [];
+  const lines = String(md || "").split("\n");
+  let heading = "";
+  let inBlock = false;
+  let fence = "";
+  let prompts = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (inBlock) {
+      if (line.trim().startsWith(fence) && !line.trim().replace(/[`~]/g, "")) { inBlock = false; continue; }
+      const pm = /^\s*Prompt:\s*(.+?)\s*\{([^}]*)\}\s*(.*)$/i.exec(line);
+      if (pm) { prompts.push({ label: pm[1].trim(), options: pm[2].split("|").map((x) => x.trim()).filter(Boolean), def: pm[3].trim() }); continue; }
+      const tm = /^\s*Table:\s*(.+?)\s*$/i.exec(line);
+      if (tm) out.push({ name: tm[1], label: humanizeTable(tm[1]), heading, kind: "block", prompts: prompts.map((x) => ({ ...x })), calls: [] });
+      else if (out.length && out[out.length - 1].kind === "block") for (const c of line.matchAll(/\[@([A-Za-z_][\w-]*)/g)) out[out.length - 1].calls.push(c[1]);
+      continue;
+    }
+    const fm = /^\s*(`{3,}|~{3,})\s*randomness\b/.exec(line);
+    if (fm) { inBlock = true; fence = fm[1]; prompts = []; continue; }
+    const h = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+    if (h) { heading = h[2].trim(); continue; }
+    const b = /^\^([A-Za-z][\w-]*)\s*$/.exec(line.trim());
+    if (b) {
+      let j = i - 1;
+      while (j >= 0 && !lines[j].trim()) j--;
+      if (j >= 0 && /^\s*\|.*\|\s*$/.test(lines[j])) out.push({ name: b[1], label: heading || humanizeTable(b[1]), heading, kind: "table", prompts: [] });
+    }
+  }
+  return out;
+}
+/** The ^id of the lookup table under a heading (for Atlas-style "[[Note#Heading|…]]" links). */
+function tableIdUnderHeading(md, heading) {
+  const want = String(heading || "").trim().toLowerCase();
+  const lines = String(md || "").split("\n");
+  let level = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const h = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(lines[i]);
+    if (level) {
+      if (h && h[1].length <= level) return null;
+      const b = /^\^([A-Za-z][\w-]*)\s*$/.exec(lines[i].trim());
+      if (b) return b[1];
+    } else if (h && h[2].trim().toLowerCase() === want) level = h[1].length;
+  }
+  return null;
+}
+/** Set a codeblock's prompts in front of a call: {! Prompt1 = "CR5to10"}[@Hoard] (the value echoes, so strip it after). */
+function promptPrefix(values) {
+  const vals = (values || []).map((v) => String(v).replace(/"/g, ""));
+  return { expr: vals.map((v, i) => `{! Prompt${i + 1} = "${v}"}`).join(""), echo: vals.join("") };
+}
 function plainResult(text) {
   return String(text || "")
+    .replace(/!?\[\[([^\]|]*?)(?:\|([^\]]+))?\]\]/g, (m, a, b) => b || String(a).split("#").pop().split("/").pop())
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/(p|div|li)>/gi, "\n")
     .replace(/<[^>]+>/g, "")
@@ -2101,9 +2314,24 @@ function plainResult(text) {
 function parseLoot(text) {
   const coins = { pp: 0, gp: 0, ep: 0, sp: 0, cp: 0 };
   const items = [];
-  const pieces = plainResult(text).split(/[;\n•]+/).map((x) => x.trim().replace(/^[-*]\s+/, "").replace(/[.,]$/, "")).filter(Boolean);
-  for (const piece of pieces) {
-    if (/^no (magic )?items?$/i.test(piece) || /^nothing$/i.test(piece)) continue;
+  // keep link targets: "[[+1 War Pick]]" → name, and remember the note it points to
+  const raw = String(text || "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li)>/gi, "\n");
+  const rawPieces = raw
+    .split(/[;\n•]+|(?<=\)|\]\])\s*,\s+/)
+    .flatMap((x) => {
+      // "11 gp and a trinket" → coins + item
+      const m = /^\s*((?:\d[\d\s,.]*)\s*(?:[×x]\s*\d[\d\s,.]*\s*)?(?:pp|gp|ep|sp|cp))\s+(?:and|a|\+|&)\s+(.+)$/i.exec(plainResult(x));
+      return m && !/\[\[/.test(m[1]) ? [m[1], x.replace(/^[^[]*?\s(?:and|a|\+|&)\s+/i, "")] : [x];
+    });
+  for (let rawPiece of rawPieces) {
+    const lm = /\[\[([^\]|#]+)(?:\|[^\]]+)?\]\]/.exec(rawPiece);
+    const link = lm ? lm[1].trim() : null;
+    let piece = plainResult(rawPiece).trim().replace(/^[-*]\s+/, "").replace(/[.,]$/, "").trim();
+    piece = piece.replace(/^[A-Za-zÀ-ž ]{2,30}:\s+(?=\S)/, ""); // "magic items: Ring of X"
+    // Atlas-style "13 × 10 gp" → 130 gp
+    piece = piece.replace(/(\d[\d,]*)\s*[×x]\s*(\d[\d,]*)\s*(pp|gp|ep|sp|cp)\b/gi, (m, a, b, c) => `${parseInt(a.replace(/,/g, ""), 10) * parseInt(b.replace(/,/g, ""), 10)} ${c}`);
+    if (!piece) continue;
+    if (/^(no\b|none$|nothing$|nic$|žádn)/i.test(piece)) continue;
     const coinOnly = /^(?:(?:\d[\d\s,.]*)\s*(?:pp|gp|ep|sp|cp)\b\s*(?:,|and|\+)?\s*)+$/i.test(piece);
     if (coinOnly) {
       for (const m of piece.matchAll(/(\d[\d\s,.]*)\s*(pp|gp|ep|sp|cp)\b/gi)) coins[m[2].toLowerCase()] += parseInt(m[1].replace(/[\s,.]/g, ""), 10) || 0;
@@ -2122,7 +2350,7 @@ function parseLoot(text) {
     if (!name) continue;
     const same = items.find((x) => x.name.toLowerCase() === name.toLowerCase() && x.cost === cost);
     if (same) same.qty += qty;
-    else items.push({ name, qty, cost });
+    else items.push(link && !/^#/.test(link) ? { name, qty, cost, link } : { name, qty, cost });
   }
   return { coins, items, any: items.length > 0 || COINS.some((c) => coins[c]) };
 }
@@ -2629,7 +2857,7 @@ class LootHandoutModal extends Modal {
     for (const it of this.loot.items) {
       if (!it.to || !it.name) continue;
       const sl = slot(it.to);
-      if (sl) sl.items.push({ name: it.name, qty: it.qty, cost: it.cost });
+      if (sl) sl.items.push({ name: it.name, qty: it.qty, cost: it.cost, link: it.link });
     }
     const c = this.loot.coins;
     if (COINS.some((k) => c[k])) {
@@ -3166,6 +3394,8 @@ class GmScreenView extends ItemView {
     m.addItem((it) => it.setTitle("Session notes").setIcon(TILE_ICONS.diary).onClick(() => this.plugin.addTile({ type: "diary" })));
     m.addItem((it) => it.setTitle("Combat…").setIcon(TILE_ICONS.combat).onClick(() => this.plugin.newCombat()));
     m.addItem((it) => it.setTitle("Dice tray").setIcon(TILE_ICONS.dice).onClick(() => this.plugin.addTile({ type: "dice" })));
+    m.addItem((it) => it.setTitle("Note…").setIcon("file-text").onClick(() => new ListPicker(this.app, this.app.vault.getMarkdownFiles().slice().sort((a, b) => b.stat.mtime - a.stat.mtime), (f) => f.path.replace(/\.md$/, ""), (f) => this.plugin.addNoteWithPicker(f), "Pick a note").open()));
+    m.addItem((it) => it.setTitle("Map…").setIcon("map").onClick(() => this.plugin.pickMapImage()));
     m.addItem((it) => it.setTitle("Sticky note").setIcon(TILE_ICONS.sticky).onClick(() => this.plugin.addTile({ type: "sticky" })));
     m.addItem((it) => it.setTitle("Checklist").setIcon(TILE_ICONS.checklist).onClick(() => this.plugin.addTile({ type: "checklist", items: [] })));
     m.addItem((it) => it.setTitle("Soundboard").setIcon(TILE_ICONS.sound).onClick(() => this.plugin.addTile({ type: "sound", pads: [] })));
@@ -3248,7 +3478,7 @@ class GmScreenView extends ItemView {
       if (r.heading) this.iconBtn(acts, TILE_ICONS.section, `Add section "${r.heading}" to screen`, () => this.addFromResult(r, true));
       const fightOn = this.plugin.combatState && !this.plugin.combatState.ended && this.plugin.ri() && typeof this.plugin.ri().addCombatant === "function";
       if (fightOn) this.iconBtn(acts, "swords", `Add ${r.file.basename} to the fight`, () => this.plugin.addToFight(r.file), "gms-to-fight");
-      this.iconBtn(acts, "plus", "Add note to screen", () => this.addFromResult(r, false));
+      this.iconBtn(acts, "plus", "Add to screen: the whole note or a part of it", () => this.plugin.addNoteWithPicker(r.file));
       this.iconBtn(acts, "file-symlink", "Open note", () => this.openFile(r.file, false));
       row.onclick = (e) => {
         if (e.ctrlKey || e.metaKey) return this.openFile(r.file, true);
@@ -3297,6 +3527,16 @@ class GmScreenView extends ItemView {
 
   /** Markdown + context for a note, section or map tile. */
   async contentFor(spec) {
+    if (spec.type === "map" && spec.image) {
+      const img = this.app.vault.getAbstractFileByPath(spec.image);
+      if (!(img instanceof TFile)) return { error: `Image not found: ${spec.image}` };
+      const markers = this.plugin.markersFor(img.path, spec.markers);
+      // sourcePath must NOT be the image: TTRPG Tools - Maps rewrites its "source note" for some
+      // actions (save view to YAML), which would corrupt a binary file. A path that doesn't exist
+      // makes those actions say "Source note not found"; markers still save to the markers.json.
+      if (markers && this.plugin.zoomMap()) return { file: img, sourcePath: `${img.path}.gm-screen-map`, md: imageMapMarkdown(`gms-${spec.id || img.path}`, img.path, markers.path), mapBase: null };
+      return { file: img, picture: true };
+    }
     const file = this.app.vault.getAbstractFileByPath(spec.path);
     if (!(file instanceof TFile)) return { error: `Note not found: ${spec.path}` };
     const text = await this.app.vault.cachedRead(file);
@@ -3310,6 +3550,11 @@ class GmScreenView extends ItemView {
       if (!block) return { file, error: "This map is no longer in the note." };
       return { file, md: mapMarkdown(block, true), mapBase: null };
     }
+    if (spec.type === "part") {
+      const md = notePartMarkdown(text, { kind: spec.partKind, ref: spec.ref, index: spec.index });
+      if (md === null) return { file, error: `This ${spec.partKind === "block" ? `block ^${spec.ref}` : spec.partKind} is no longer in ${file.basename}.` };
+      return { file, md, mapBase: null };
+    }
     if (spec.type === "section" && spec.heading) {
       const sec = extractSection(text, spec.heading, spec.level);
       if (!sec) return { file, error: `Heading "${spec.heading}" not found in ${file.basename}.` };
@@ -3318,6 +3563,69 @@ class GmScreenView extends ItemView {
     }
     const lines = text.replace(/\r\n/g, "\n").split("\n");
     return { file, md: lines.slice(frontmatterEnd(lines)).join("\n"), mapBase: 0 };
+  }
+
+  /** A plain image as a map: wheel to zoom (around the pointer), drag to pan, double-click to fit. */
+  renderPicture(host, file, comp) {
+    const wrap = host.createDiv({ cls: "gms-render is-map-render gms-picture", attr: { "data-gms-path": file.path } });
+    const img = wrap.createEl("img", { attr: { src: this.app.vault.getResourcePath(file), alt: file.basename, draggable: "false" } });
+    let s = 1;
+    let x = 0;
+    let y = 0;
+    const apply = () => { img.style.transform = `translate(${x}px, ${y}px) scale(${s})`; };
+    const fit = () => {
+      const W = wrap.clientWidth;
+      const H = wrap.clientHeight;
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      if (!W || !H) return;
+      s = Math.min(W / iw, H / ih);
+      x = (W - iw * s) / 2;
+      y = (H - ih * s) / 2;
+      apply();
+    };
+    img.addEventListener("load", fit);
+    if (img.complete) window.setTimeout(fit, 0);
+    if (typeof ResizeObserver !== "undefined") {
+      let last = "";
+      const ro = new ResizeObserver(() => {
+        const k = `${wrap.clientWidth}x${wrap.clientHeight}`;
+        if (k !== last && !wrap.hasClass("is-moved")) fit();
+        last = k;
+      });
+      ro.observe(wrap);
+      if (comp) comp.register(() => ro.disconnect());
+    }
+    wrap.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const r = wrap.getBoundingClientRect();
+      const px = e.clientX - r.left;
+      const py = e.clientY - r.top;
+      const ns = Math.min(20, Math.max(0.05, s * Math.exp(-e.deltaY * 0.0015)));
+      x = px - ((px - x) * ns) / s;
+      y = py - ((py - y) * ns) / s;
+      s = ns;
+      wrap.addClass("is-moved");
+      apply();
+    }, { passive: false });
+    wrap.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const sx = e.clientX - x;
+      const sy = e.clientY - y;
+      wrap.addClass("is-panning");
+      const move = (ev) => { x = ev.clientX - sx; y = ev.clientY - sy; wrap.addClass("is-moved"); apply(); };
+      const up = () => {
+        wrap.removeClass("is-panning");
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    });
+    wrap.addEventListener("dblclick", () => { wrap.removeClass("is-moved"); fit(); });
+    return wrap;
   }
 
   /**
@@ -3330,6 +3638,10 @@ class GmScreenView extends ItemView {
     const c = await this.contentFor(spec);
     if (c.error) {
       host.createDiv({ cls: "gms-empty", text: c.error });
+      return c;
+    }
+    if (c.picture) {
+      this.renderPicture(host, c.file, comp);
       return c;
     }
     // Same wrapper and cssclasses the note gets in reading view, so sheet/snippet styling applies
@@ -3349,7 +3661,7 @@ class GmScreenView extends ItemView {
       host.addClass("gms-note-host");
       this.plugin.responsive.watch(host, applied, comp);
     }
-    await MarkdownRenderer.render(this.app, c.md, el, c.file.path, comp);
+    await MarkdownRenderer.render(this.app, c.md, el, c.sourcePath || c.file.path, comp);
     el.addEventListener("click", (e) => {
       const a = e.target.closest && e.target.closest("a.internal-link");
       if (!a) return;
@@ -3414,7 +3726,7 @@ class GmScreenView extends ItemView {
 
   specKey(spec) {
     if (!spec) return "";
-    return [spec.type, spec.path, spec.heading || "", spec.mapId || spec.mapLine || spec.mapIndex || "", spec.blockId || ""].join("|");
+    return [spec.type, spec.path, spec.heading || "", spec.mapId || spec.mapLine || spec.mapIndex || "", spec.blockId || "", spec.partKind || "", spec.ref || "", spec.image || ""].join("|");
   }
 
   openPopup(spec) {
@@ -3685,6 +3997,8 @@ class GmScreenView extends ItemView {
     if (t.type === "diary") return "Session notes";
     const base = (t.path || "").split("/").pop().replace(/\.md$/, "");
     if (t.type === "section") return `${base} › ${t.heading}`;
+    if (t.type === "part") return `${base} › ${t.partKind === "block" ? `^${t.ref}` : t.ref || t.partKind}`;
+    if (t.type === "map" && t.image) return t.image.split("/").pop().replace(/\.[^.]+$/, "");
     if (t.type === "map") return `${base} – map`;
     return base;
   }
@@ -3731,7 +4045,7 @@ class GmScreenView extends ItemView {
     this.iconBtn(head, open ? "minimize-2" : "maximize-2", open ? "Shrink to name" : "Show content", () => this.toggleTile(t));
     this.iconBtn(head, "more-horizontal", "Tile options", (e) => this.tileMenu(t, e));
 
-    const clickable = !open && (t.type === "note" || t.type === "section" || t.type === "map" || t.type === "combat");
+    const clickable = !open && (t.type === "note" || t.type === "section" || t.type === "part" || t.type === "map" || t.type === "combat");
     head.toggleClass("is-clickable", clickable || (open && !!t.path));
     const locked = !!this.screen.locked;
     el.toggleClass("is-locked", locked);
@@ -3774,7 +4088,7 @@ class GmScreenView extends ItemView {
 
   tileMenu(t, e) {
     const m = new Menu();
-    const content = t.type === "note" || t.type === "section" || t.type === "map" || t.type === "combat";
+    const content = t.type === "note" || t.type === "section" || t.type === "part" || t.type === "map" || t.type === "combat";
     const open = isOpenTile(t);
     m.addItem((it) => it.setTitle(open ? "Shrink to name" : "Show content on screen").setIcon(open ? "minimize-2" : "maximize-2").onClick(() => this.toggleTile(t)));
     if (content) m.addItem((it) => it.setTitle("Open in popup").setIcon("app-window").onClick(() => this.openPopup({ ...t })));
@@ -4082,6 +4396,9 @@ class GmScreenView extends ItemView {
       e.createDiv({ cls: "setting-item-description", text: "Turn on Randomness in Settings → Community plugins, then come back." });
       return;
     }
+    t.tables.forEach((e) => p.fixTableEntry(e));
+    const rcomp = this.addChild(new Component());
+    this.tileComps.push(rcomp);
     const wrap = body.createDiv({ cls: "gms-rt-wrap" });
     const listEl = wrap.createDiv({ cls: "gms-rt-list" });
     const resEl = wrap.createDiv({ cls: "gms-rt-results" });
@@ -4100,7 +4417,8 @@ class GmScreenView extends ItemView {
         head.createSpan({ cls: "gms-rt-result-time", text: h.at ? moment(h.at).format("HH:mm") : "" });
         const txt = card.createDiv({ cls: "gms-rt-result-text" });
         try {
-          txt.appendChild(sanitizeHTMLToDom(String(h.result || "").replace(/; /g, "<br>")));
+          // markdown + HTML, so [[item links]] are clickable
+          MarkdownRenderer.render(this.app, String(h.result || "").replace(/; /g, "<br>"), txt, h.notePath || h.filePath || "", rcomp);
         } catch (e) {
           txt.setText(plainResult(h.result));
         }
@@ -4108,7 +4426,11 @@ class GmScreenView extends ItemView {
         const row = card.createDiv({ cls: "gms-rt-actions" });
         const again = row.createEl("button", { cls: "gms-rt-act", attr: { "aria-label": "Roll this table again" } });
         setIcon(again, "refresh-cw");
-        again.onclick = () => roll(t.tables.find((x) => x.id === h.tableId) || { name: h.name, label: h.label, filePath: h.filePath });
+        again.onclick = (ev) => {
+          const e = t.tables.find((x) => x.id === h.tableId);
+          if (e && e.prompts && e.prompts.length) return roll(e, null, { [e.prompts[0].label]: e.lastPrompt || e.prompts[0].def });
+          roll(e || { name: h.name, label: h.label, filePath: h.filePath, notePath: h.notePath }, ev);
+        };
         const copy = row.createEl("button", { cls: "gms-rt-act", attr: { "aria-label": "Copy" } });
         setIcon(copy, "copy");
         copy.onclick = async () => {
@@ -4130,10 +4452,25 @@ class GmScreenView extends ItemView {
       });
     };
 
-    const roll = async (entry) => {
-      const r = await p.rollTable(entry);
+    const roll = async (entry, ev, values) => {
+      if (entry.prompts && entry.prompts.length && !values) {
+        // ask the codeblock's prompt first (e.g. CR band) – remembered for next time
+        const pr = entry.prompts[0];
+        const m = new Menu();
+        for (const opt of pr.options) {
+          m.addItem((it) => it.setTitle(`${pr.label}: ${opt}`).setIcon(opt === (entry.lastPrompt || pr.def) ? "check" : "dices").onClick(() => {
+            entry.lastPrompt = opt;
+            p.saveSoon();
+            roll(entry, null, { [pr.label]: opt });
+          }));
+        }
+        if (ev && ev.clientX !== undefined) m.showAtMouseEvent(ev);
+        else roll(entry, null, { [pr.label]: entry.lastPrompt || pr.def });
+        return;
+      }
+      const r = await p.rollTable(entry, values);
       if (!r) return;
-      t.history.unshift({ tableId: entry.id, name: entry.name, filePath: r.filePath, label: entry.label || entry.name, result: r.result, at: Date.now(), loot: p.isLootEntry(entry) });
+      t.history.unshift({ tableId: entry.id, name: entry.name, filePath: r.filePath, notePath: r.notePath || undefined, label: `${entry.label || entry.name}${r.prompt ? ` · ${r.prompt}` : ""}`, result: r.result, at: Date.now(), loot: p.isLootEntry(entry) });
       t.history.length = Math.min(t.history.length, 12);
       p.saveSoon();
       drawResults();
@@ -4153,7 +4490,8 @@ class GmScreenView extends ItemView {
       const btns = sec.createDiv({ cls: "gms-rt-btns" });
       for (const e of entries) {
         const b = btns.createEl("button", { cls: "gms-rt-btn", text: e.label || e.name, attr: { "aria-label": `Roll ${e.name}` } });
-        b.onclick = () => roll(e);
+        if (e.prompts && e.prompts.length) b.addClass("has-prompt");
+        b.onclick = (ev) => roll(e, ev);
         b.addEventListener("contextmenu", (ev) => {
           ev.preventDefault();
           ev.stopPropagation();
@@ -4972,7 +5310,7 @@ class GmScreenPlugin extends Plugin {
       checkCallback: (checking) => {
         const f = this.app.workspace.getActiveFile();
         if (!f || f.extension !== "md") return false;
-        if (!checking) this.addTile({ type: "note", path: f.path });
+        if (!checking) this.addNoteWithPicker(f);
         return true;
       },
     });
@@ -5045,8 +5383,15 @@ class GmScreenPlugin extends Plugin {
     this.addCommand({ id: "refresh-party", name: "Refresh party", callback: () => this.views().forEach((v) => v.renderPartyTiles()) });
 
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
+      if (isImage(file)) {
+        menu.addItem((it) => it.setTitle("Add map to Game Master screen").setIcon("map").onClick(() => {
+          const mk = this.markersFor(file.path);
+          this.addTile({ type: "map", path: file.path, image: file.path, markers: mk ? mk.path : undefined, expanded: true });
+        }));
+        return;
+      }
       if (!(file instanceof TFile) || file.extension !== "md") return;
-      menu.addItem((it) => it.setTitle("Add to Game Master screen").setIcon("shield").onClick(() => this.addTile({ type: "note", path: file.path })));
+      menu.addItem((it) => it.setTitle("Add to Game Master screen…").setIcon("shield").onClick(() => this.addNoteWithPicker(file)));
     }));
     this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor, ctx) => {
       if (!ctx.file) return;
@@ -5067,7 +5412,11 @@ class GmScreenPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("rename", async (file, oldPath) => {
       this.index.invalidate(oldPath);
       let changed = false;
-      for (const sc of this.settings.screens) for (const t of sc.tiles) if (t.path === oldPath) { t.path = file.path; changed = true; }
+      for (const sc of this.settings.screens) for (const t of sc.tiles) {
+        if (t.path === oldPath) { t.path = file.path; changed = true; }
+        if (t.image === oldPath) { t.image = file.path; changed = true; }
+        if (t.markers === oldPath) { t.markers = file.path; changed = true; }
+      }
       if (this.settings.diary.current === oldPath) { this.settings.diary.current = file.path; changed = true; }
       if (changed) {
         await this.saveSettings();
@@ -5721,34 +6070,161 @@ class GmScreenPlugin extends Plugin {
     }
   }
   /** Roll one table entry → { result, filePath } (null + notice on failure). */
-  async rollTable(entry) {
+  /** The note a table lives in (tables inside notes are rolled in that note's scope). */
+  tableNote(entry) {
+    if (entry.notePath) return entry.notePath;
+    if (entry.filePath && /\.md$/i.test(entry.filePath)) return entry.filePath;
+    const m = /^__note:([^^]+)\^/.exec(entry.name || "");
+    if (m) {
+      const f = this.app.metadataCache.getFirstLinkpathDest(m[1], "") || this.app.vault.getMarkdownFiles().find((x) => x.basename.toLowerCase() === m[1].toLowerCase());
+      return f ? f.path : null;
+    }
+    return null;
+  }
+  /** Older entries saved Randomness' internal names ("__note:dungeony a pasti^roomContents"). */
+  fixTableEntry(e) {
+    if (!e || !/^__note:/.test(e.name || "")) {
+      if (e && (e.group === "(this note)" || e.group === "(generator)")) {
+        const np = this.tableNote(e);
+        if (np) e.group = np.split("/").pop().replace(/\.md$/, "");
+      }
+      return e;
+    }
+    const np = this.tableNote(e);
+    e.name = e.name.replace(/^__note:[^^]*\^/, "");
+    if (np) { e.notePath = np; e.group = np.split("/").pop().replace(/\.md$/, ""); }
+    if (!e.label || /^__note:|^ /.test(e.label) || /__note/.test(e.label)) e.label = humanizeTable(e.name);
+    delete e.filePath;
+    return e;
+  }
+  /** Roll one table entry → { result, filePath, notePath, prompt } (null + notice on failure). */
+  async rollTable(entry, promptValues) {
     const api = this.randomness();
     if (!api) { new Notice("The Randomness plugin isn't on."); return null; }
-    const filePath = entry.filePath || (entry.starter ? this.starterPath(entry.starter) : undefined);
-    const opts = filePath && this.app.vault.getAbstractFileByPath(filePath) ? { filePath } : {};
-    try {
-      const r = await api.rollUnscoped(entry.name, opts);
-      if (!r || r.error) {
-        new Notice(`Couldn't roll ${entry.label || entry.name}: ${(r && r.error) || "no result"}`);
-        return null;
+    this.fixTableEntry(entry);
+    const label = entry.label || entry.name;
+    let notePath = this.tableNote(entry);
+    if (!notePath && !entry.filePath && !entry.starter) {
+      // saved without its note (e.g. picked as "(this note)"): find the note that defines it
+      const hits = (await this.allRandomTables()).filter((x) => x.notePath && x.name.toLowerCase() === String(entry.name).toLowerCase());
+      if (hits.length === 1) {
+        notePath = entry.notePath = hits[0].notePath;
+        entry.group = hits[0].group;
+        if (hits[0].prompts && hits[0].prompts.length) entry.prompts = hits[0].prompts;
+        if (!entry.label || entry.label === entry.name) entry.label = hits[0].label;
+        this.saveSoon();
+        this.refreshViews();
       }
-      return { result: r.result, filePath: r.source || filePath };
+    }
+    const vals = (entry.prompts || []).map((p) => (promptValues && promptValues[p.label]) || p.def || p.options[0] || "");
+    try {
+      let result;
+      let source;
+      if (notePath) {
+        // a table inside a note: roll it in that note's scope
+        const pre = promptPrefix(vals);
+        const r = await api.rollExpression(`${pre.expr}[@${entry.name}]`, { callerNotePath: notePath });
+        if (!r || r.error) throw new Error((r && r.error) || "no result");
+        result = String(r.result);
+        if (pre.echo && result.startsWith(pre.echo)) result = result.slice(pre.echo.length);
+        source = notePath;
+      } else {
+        const filePath = entry.filePath || (entry.starter ? this.starterPath(entry.starter) : undefined);
+        const opts = filePath && this.app.vault.getAbstractFileByPath(filePath) ? { filePath } : {};
+        if (vals.length) opts.promptValues = Object.fromEntries((entry.prompts || []).map((p, k) => [p.label, vals[k]]));
+        const r = await api.rollUnscoped(entry.name, opts);
+        if (!r || r.error) throw new Error((r && r.error) || "no result");
+        result = String(r.result);
+        source = r.source || filePath;
+      }
+      if (!String(result).trim()) throw new Error("the table gave an empty result");
+      result = await this.expandTableLinks(result, notePath || "", 0);
+      return { result, filePath: source, notePath, prompt: vals.join(", ") };
     } catch (e) {
-      new Notice(`Couldn't roll ${entry.label || entry.name}: ${e.message || e}`);
+      new Notice(`Couldn't roll ${label}: ${e.message || e}`);
       return null;
     }
   }
-  async pickRandomTable(t) {
+  /**
+   * Atlas-style links in results ("[[#Gems (50 gp)|a 50 gp gem]]", "[[SRD tabulky#Trinkets|a trinket]]")
+   * point at the heading of another table: roll that table and put its result in place of the link.
+   */
+  async expandTableLinks(text, notePath, depth) {
     const api = this.randomness();
-    if (!api) return new Notice("The Randomness plugin isn't on.");
-    let list = [];
-    try { list = await api.tablesWithSources(); } catch (e) { list = []; }
-    if (!list.length) return new Notice("Randomness has no tables yet. Install the starter tables or create a generator file.");
-    new ListPicker(this.app, list, (x) => `${x.name} — ${x.source || x.filePath || ""}`, (x) => {
+    if (!api || depth > 4 || !/\[\[[^\]]*#/.test(text)) return text;
+    const re = /\[\[([^\]|#]*)#([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+    let out = "";
+    let last = 0;
+    for (const m of text.matchAll(re)) {
+      out += text.slice(last, m.index);
+      last = m.index + m[0].length;
+      let replacement = m[0];
+      try {
+        const target = m[1].trim();
+        const file = target ? this.app.metadataCache.getFirstLinkpathDest(target, notePath) : this.app.vault.getAbstractFileByPath(notePath);
+        if (file instanceof TFile && file.extension === "md") {
+          const id = tableIdUnderHeading(await this.app.vault.cachedRead(file), m[2]);
+          if (id) {
+            const r = await api.rollExpression(`[@${id}]`, { callerNotePath: file.path });
+            if (r && !r.error && String(r.result).trim()) replacement = await this.expandTableLinks(String(r.result), file.path, depth + 1);
+          }
+        }
+      } catch (e) { /* keep the link */ }
+      out += replacement;
+    }
+    return out + text.slice(last);
+  }
+  /** Every Randomness table: tables inside notes (by heading) and generator (.rdm) files. */
+  async allRandomTables() {
+    const api = this.randomness();
+    const out = [];
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      const c = this.app.metadataCache.getFileCache(f) || {};
+      const hasIds = c.blocks && Object.keys(c.blocks).length;
+      const hasCode = (c.sections || []).some((x) => x.type === "code");
+      if (!hasIds && !hasCode) continue;
+      let md = "";
+      try { md = await this.app.vault.cachedRead(f); } catch (e) { continue; }
+      if (!/\^[A-Za-z]|```\s*randomness|~~~\s*randomness/.test(md)) continue;
+      for (const t of noteTablesIn(md)) out.push({ ...t, notePath: f.path, group: f.basename });
+    }
+    let gen = [];
+    try { gen = api ? await api.tablesWithSources("") : []; } catch (e) { gen = []; }
+    for (const x of gen) {
+      if (!x || !x.name || /^__note:/.test(x.name) || x.inScope || !/\.(rdm|ipt)$/i.test(x.filePath || "")) continue;
+      out.push({ name: x.name, label: humanizeTable(x.name), group: x.source || "Generators", filePath: x.filePath, prompts: [] });
+    }
+    return out;
+  }
+  async pickRandomTable(t) {
+    if (!this.randomness()) return new Notice("The Randomness plugin isn't on.");
+    const list = await this.allRandomTables();
+    if (!list.length) return new Notice("No Randomness tables found. Install the starter tables, or give a table in a note a ^block id.");
+    // "All tables in <note>": headings + codeblock tables nothing else in the note calls
+    const byNote = new Map();
+    for (const x of list) if (x.notePath) (byNote.get(x.notePath) || byNote.set(x.notePath, []).get(x.notePath)).push(x);
+    const wholes = [...byNote.entries()].map(([notePath, xs]) => {
+      const called = new Set(xs.filter((x) => x.kind === "block").flatMap((x) => (x.calls || [])).map((n) => n.toLowerCase()));
+      const top = xs.filter((x) => x.kind !== "block" || !called.has(x.name.toLowerCase()));
+      return { whole: true, notePath, group: xs[0].group, tables: top, label: `All ${top.length} tables`, name: "" };
+    }).filter((w) => w.tables.length > 1);
+    const mk = (x) => {
+      const e = { id: uid(), group: x.group, label: x.label, name: x.name };
+      if (x.notePath) e.notePath = x.notePath;
+      if (x.filePath) e.filePath = x.filePath;
+      if (x.prompts && x.prompts.length) e.prompts = x.prompts;
+      return e;
+    };
+    new ListPicker(this.app, [...wholes, ...list], (x) => (x.whole
+      ? `📄 ${x.group} — ${x.label} from this note`
+      : `${x.label}${x.prompts && x.prompts.length ? ` (asks ${x.prompts.map((p) => p.label).join(", ")})` : ""} — ${x.group}${x.label !== x.name ? `  ·  ${x.name}` : ""}`), (x) => {
       t.tables = t.tables || [];
-      t.tables.push({ id: uid(), group: x.source || "Tables", label: x.name.replace(/([a-z])([A-Z])/g, "$1 $2"), name: x.name, filePath: x.filePath });
+      if (x.whole) {
+        const have = new Set(t.tables.filter((e) => e.notePath === x.notePath).map((e) => e.name.toLowerCase()));
+        t.tables.push(...x.tables.filter((e) => !have.has(e.name.toLowerCase())).map(mk));
+      } else t.tables.push(mk(x));
       this.updateTile(t, {}, true);
-    }, "Pick a Randomness table").open();
+    }, "Pick a random table, or a whole note of tables").open();
   }
 
   /* ----- loot handout (One DnD Character Sheet inventory) ----- */
@@ -5832,7 +6308,7 @@ class GmScreenPlugin extends Plugin {
     await this.app.fileManager.processFrontMatter(f, (fm) => {
       if (!Array.isArray(fm.inventory_list)) fm.inventory_list = [];
       for (const it of items || []) {
-        const note = this.itemNote(it.name);
+        const note = (it.link && this.itemNote(String(it.link).split("/").pop())) || this.itemNote(it.name);
         const nfm = note ? this.party.fm(note) : {};
         const linkText = note ? this.app.metadataCache.fileToLinktext(note, f.path) : "";
         fm.inventory_list.push({
@@ -5932,7 +6408,7 @@ class GmScreenPlugin extends Plugin {
     const view = this.views()[0];
     const width = (view && view.boardWrap && view.boardWrap.clientWidth) || 1000;
     const tile = { id: uid(), x: 0, y: 0, w: size.ew || size.w, h: size.h, cw: Math.min(size.w, 240), expanded: false };
-    for (const k of ["type", "path", "heading", "level", "mapIndex", "mapId", "mapLine", "blockId", "title", "text", "color", "items", "pads", "clocks", "clockBlock", "tables", "history"]) if (spec[k] !== undefined) tile[k] = spec[k];
+    for (const k of ["type", "path", "heading", "level", "mapIndex", "mapId", "mapLine", "blockId", "title", "text", "color", "items", "pads", "clocks", "clockBlock", "tables", "history", "image", "markers", "expanded", "partKind", "ref", "index"]) if (spec[k] !== undefined) tile[k] = spec[k];
     const box = tileBox(tile);
     Object.assign(tile, freeSpot(sc.tiles, box.w, box.h, width));
     sc.tiles.push(tile);
@@ -5941,6 +6417,70 @@ class GmScreenPlugin extends Plugin {
     this.views().forEach((v) => v.renderBoard());
     const label = this.views()[0] ? this.views()[0].tileTitle(tile) : tile.type;
     new Notice(`Added ${label} to "${sc.name}"`);
+  }
+  /** Add a note: ask whether it's the whole note or one part of it. */
+  async addNoteWithPicker(file) {
+    if (!(file instanceof TFile)) return;
+    let parts = [];
+    try { parts = noteParts(await this.app.vault.cachedRead(file)); } catch (e) { parts = []; }
+    if (!parts.length) return this.addTile({ type: "note", path: file.path });
+    new NotePartPicker(this, file, parts).open();
+  }
+  async addNotePart(file, x) {
+    switch (x.kind) {
+      case "heading": return this.addTile({ type: "section", path: file.path, heading: x.heading, level: x.level });
+      case "block": return this.addTile({ type: "part", path: file.path, partKind: "block", ref: x.id });
+      case "callout": return this.addTile({ type: "part", path: file.path, partKind: "callout", ref: x.title, index: x.index });
+      case "statblock": return this.addTile({ type: "part", path: file.path, partKind: "statblock", ref: x.name, index: x.index });
+      case "image": {
+        const img = this.app.metadataCache.getFirstLinkpathDest(x.target, file.path) || this.app.vault.getAbstractFileByPath(x.target);
+        if (!(img instanceof TFile)) return new Notice(`Couldn't find the picture ${x.target}.`);
+        const mk = this.markersFor(img.path);
+        return this.addTile({ type: "map", path: img.path, image: img.path, markers: mk ? mk.path : undefined, expanded: true });
+      }
+      case "map": {
+        const blocks = findMapBlocks(await this.app.vault.cachedRead(file));
+        const block = blocks[x.index];
+        if (block) return this.addMapTile(file, { index: x.index, block });
+        return null;
+      }
+      default: return this.addTile({ type: "note", path: file.path });
+    }
+  }
+  zoomMap() {
+    return this.app.plugins && this.app.plugins.plugins ? this.app.plugins.plugins["zoom-map"] || null : null;
+  }
+  /** The markers.json of a map image (the one saved on the tile first, then TTRPG Tools - Maps' names). */
+  markersFor(imagePath, preferred) {
+    for (const p of [preferred, ...markersCandidates(imagePath)]) {
+      if (!p) continue;
+      const f = this.app.vault.getAbstractFileByPath(p);
+      if (f instanceof TFile) return f;
+    }
+    return null;
+  }
+  /** Add → Map…: every image in the vault, TTRPG Tools maps (an image with a markers.json) marked. */
+  async pickMapImage() {
+    const files = this.app.vault.getFiles();
+    const items = files.filter(isImage).map((f) => ({ image: f, markers: this.markersFor(f.path) }));
+    const covered = new Set(items.filter((x) => x.markers).map((x) => x.markers.path));
+    // markers.json files whose image has another name (e.g. a map with several layers)
+    for (const j of files.filter((f) => /\.markers\.json$/i.test(f.path) && !covered.has(f.path))) {
+      try {
+        const ip = imageFromMarkers(await this.app.vault.cachedRead(j));
+        const img = ip && this.app.vault.getAbstractFileByPath(ip);
+        if (img instanceof TFile && isImage(img)) items.push({ image: img, markers: j, viaJson: true });
+      } catch (e) { /* not a map file */ }
+    }
+    // an image that is a TTRPG map through a differently-named markers.json isn't also listed as a plain picture
+    const mapped = new Set(items.filter((x) => x.markers).map((x) => x.image.path));
+    for (let i = items.length - 1; i >= 0; i--) if (!items[i].markers && mapped.has(items[i].image.path)) items.splice(i, 1);
+    if (!items.length) return new Notice("No images in the vault yet.");
+    items.sort((a, b) => (b.markers ? 1 : 0) - (a.markers ? 1 : 0) || a.image.path.localeCompare(b.image.path));
+    new ListPicker(this.app, items, (x) => `${x.markers ? "🗺 " : "🖼 "}${x.image.path}${x.markers ? `  ·  TTRPG map${x.viaJson ? ` (${x.markers.name})` : ""}` : ""}`, (x) => {
+      if (x.markers && !this.zoomMap()) new Notice("TTRPG Tools - Maps isn't on, so the map is shown as a plain picture (no markers).");
+      this.addTile({ type: "map", path: x.image.path, image: x.image.path, markers: x.markers ? x.markers.path : undefined, expanded: true });
+    }, "Pick a map image (🗺 = TTRPG Tools map with markers)").open();
   }
   addMapTile(file, hit) {
     this.addTile({ type: "map", path: file.path, mapIndex: hit.index, mapId: hit.block.id || undefined, mapLine: hit.block.start, title: `${file.basename} – map` });
@@ -6477,5 +7017,5 @@ module.exports = GmScreenPlugin;
 module.exports.__test = {
   norm, scoreEntry, computeSlots, stripLink, getPath, flattenValues, toInt, PRESETS,
   parseFormula, rollFormula, withAdvantage, critOf, breakdown, resultFromDiceRoller, visualDice, SHAPES, DiceStage,
-  PartyReader, ResponsiveNotes, rollContext, rollWhat, snapResize, screenToJson, screenFromJson, SoundBoard, SoundPadModal, padKind, padLoops, isAudio, spellEffectKind, parseLoot, splitCoins, plainResult, slugParty, STARTER_TABLES, STARTER_FILES, LootHandoutModal, parseClocks, ckRemovePart, ckSetFill, ckSetValue, ckAdd, findClockBlocks, replaceClockBlock, parseDuration, hms, hm, insertNotes, spellcasting, findInitiativeBlock, combatBlock, extractSection, findMapBlocks, mapMarkdown, pickMap, cleanHeading, fillTokens, lastSessionNumber, padNum, cleanFileName, freeSpot, tileBox, isOpenTile, snapToTiles,
+  PartyReader, ResponsiveNotes, rollContext, rollWhat, snapResize, screenToJson, screenFromJson, SoundBoard, SoundPadModal, padKind, padLoops, isAudio, noteParts, notePartMarkdown, NotePartPicker, markersCandidates, imageFromMarkers, imageMapMarkdown, spellEffectKind, noteTablesIn, tableIdUnderHeading, humanizeTable, promptPrefix, parseLoot, splitCoins, plainResult, slugParty, STARTER_TABLES, STARTER_FILES, LootHandoutModal, parseClocks, ckRemovePart, ckSetFill, ckSetValue, ckAdd, findClockBlocks, replaceClockBlock, parseDuration, hms, hm, insertNotes, spellcasting, findInitiativeBlock, combatBlock, extractSection, findMapBlocks, mapMarkdown, pickMap, cleanHeading, fillTokens, lastSessionNumber, padNum, cleanFileName, freeSpot, tileBox, isOpenTile, snapToTiles,
 };

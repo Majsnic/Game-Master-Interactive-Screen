@@ -14,7 +14,7 @@ A **GM screen for [Obsidian](https://obsidian.md)**. Build tabbed screens out of
 - **Tiles**: drag by the title bar, resize from the corner and shrink to just the name. Tiles **snap** to their neighbours when you move and when you resize them.
 - **Lock layout**: freeze a screen so nothing moves by accident during play.
 - **Templates, export and import**: save a screen as a template and start new screens from it. Export a screen as JSON (copy it, or save a `.gmscreen.json` file) and import it in another vault.
-- **Search**: the search bar finds notes, headings and maps in your vault. Pin a whole note, a single section (`## Heading`) or a map.
+- **Search**: the search bar finds notes, headings and maps in your vault. Pin a whole note or just a part of it, like an Obsidian embed: a section (`## Heading`), a `^block`, a callout, a statblock, a picture or a map.
 
 ### Pinned notes, sections and maps
 - A pinned note shows its name. Click it to open a **movable popup** with the note rendered as in reading view, with its own CSS classes.
@@ -107,7 +107,7 @@ Game Master Interactive Screen is **not in the Community plugins list yet**.
 ## Getting started
 
 1. Click the **shield icon** in the left ribbon (or run *Open Game Master Interactive Screen*).
-2. Use **+ Add** in the toolbar to add tiles: Party, Session notes, Combat, Dice tray, Sticky note, Checklist, Soundboard, Clocks & timers, Random tables.
+2. Use **+ Add** in the toolbar to add tiles: Party, Session notes, Combat, Dice tray, Note, Map, Sticky note, Checklist, Soundboard, Clocks & timers, Random tables.
 3. Search for a note and click the pin to put it on the screen, or right-click a note in the file explorer → **Add to Game Master screen**. In the editor, right-click a heading or a map → **Add … to Game Master screen**.
 4. Right-click a tab for screen options; the ⋯ on a tile for tile options.
 
@@ -145,10 +145,6 @@ plugin.registerEvent(app.workspace.on("game-master-screen:rolled", (r) => {
 ```
 
 ---
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md).
 
 ## Credits
 

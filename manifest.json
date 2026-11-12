@@ -1,7 +1,7 @@
 {
   "id": "game-master-screen",
   "name": "Game Master Interactive Screen",
-  "version": "0.12.4",
+  "version": "0.15.0",
   "minAppVersion": "1.4.0",
   "description": "A system-agnostic GM screen: tabbed screens with pinned notes, maps and live party stats, a dice tray, combat bar, session notes, sticky notes, checklists, soundboard, clocks and timers, and random tables with loot hand-out.",
   "author": "Majsnic",

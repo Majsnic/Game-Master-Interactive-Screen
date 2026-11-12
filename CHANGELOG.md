@@ -2,6 +2,42 @@
 
 All notable changes to Game Master Interactive Screen. Newest first.
 
+## 0.15.0 – 2026-11-12
+### Added
+- **Add just part of a note**, like Obsidian embeds. When you add a note (search **+**, **Add → Note…**, right-click a note → **Add to Game Master screen…**, or the *Add active note* command), a picker lets you choose:
+  - 📄 the whole note,
+  - **# a heading** and everything under it,
+  - **¶ a block** marked with `^id` (a paragraph, list item or whole table),
+  - **💬 a callout** (nested callouts listed indented),
+  - **🐉 a statblock** (Fantasy Statblocks), by monster name,
+  - **🖼 a picture** embedded in the note (opens in the zoom / pan viewer, or as a TTRPG map if it has markers),
+  - **🗺 a map** (` ```zoommap ``` ` block).
+- New **Add → Note…** entry in the toolbar menu.
+- A note with nothing to pick from is added whole, without the picker.
+### Notes
+- Part tiles follow the note: edit the note and the tile updates. If the block, callout or statblock is removed, the tile says so instead of breaking.
+
+## 0.14.0 – 2026-11-12
+### Added
+- **Add → Map…** puts a map on the screen straight from an image in your vault.
+  - An image that has a **TTRPG Tools – Maps** markers file next to it (`map.png.markers.json` or `map.markers.json`, or any `.markers.json` that names the image) opens as the full interactive map, with its markers, layers and tools. It's marked 🗺 in the picker.
+  - Any other image (🖼) opens as a **picture you can zoom and pan**: mouse wheel to zoom, drag to move, double-click to fit it back.
+- Right-click an image in the file explorer → **Add map to Game Master screen**.
+### Notes
+- Maps added this way never use the image file as their "source note", so TTRPG Tools – Maps can't write into the image. Its *save view to YAML* actions just say "Source note not found"; markers still save to the markers file.
+
+## 0.13.0 – 2026-11-12
+### Added
+- **Random tables inside notes.** Markdown tables with a `^tableId` and `Table:` blocks in ` ```randomness ``` ` codeblocks can now be pinned and rolled. That's the same format Atlas VTT reads, so one set of tables works in both.
+  - The picker lists them by their heading (e.g. *Individual Treasure (CR 0–4)*) under the note's name, next to the `.rdm` generator tables.
+  - **All tables from a note** at once: helper tables that another table calls are left out.
+- **Prompts.** A table with a `Prompt:` (e.g. CR or level band) asks for the value when you click it and remembers your last choice. *Roll again* uses the same value.
+- **Heading links are rolled**, like Atlas does. A result such as `[[#Gems (50 gp)|a 50 gp gem]]` or `[[SRD tabulky#Trinkets|a trinket]]` gets the linked table's roll in its place.
+- Results show as Markdown, so item links are clickable.
+### Fixed
+- Pinned tables from notes no longer fail with "Couldn't roll". Buttons saved earlier with Randomness' internal names (`__note:…^…`) or as "(this note)" are repaired automatically.
+- **Hand out…** reads Atlas-style loot: "8 × 10 gp", "5,000 gp", "110 pp and Carnelian (50 gp)", and items given as `[[links]]`. Linked items are matched to their item notes.
+
 ## 0.12.4 – 2026-11-10
 ### Changed
 - The fallback folder for character-sheet data is now `Compendium/Character Sheet Data`, matching the public One DnD Character Sheet. It is only used when the sheet doesn't report its own folder.
