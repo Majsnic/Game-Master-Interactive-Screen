@@ -5,6 +5,34 @@ A **GM screen for [Obsidian](https://obsidian.md)**. Build tabbed screens out of
 - **System-agnostic.** It works with any game. With **One DnD Character Sheet** and **Roll for Initiative** it also knows your party's HP, AC, spell slots and the running fight.
 - **Everything stays in your vault.** Notes are shown, not copied. Sticky notes, checklists, soundboard buttons and clock tiles live only on the screen.
 
+![A session screen: party cards, a zoomable map, clocks and the session timer, dice tray, random tables, a checklist, a sticky note and the soundboard](screenshots/hero.png)
+
+---
+
+## Showcase
+
+### A screen for every part of the night
+Keep one tab for the session, one for the fight and one for the town the party is in. Every tile can be moved, resized and shrunk to its title, and the layout can be locked so nothing moves during play.
+
+### Run the fight
+With **Roll for Initiative**, a combat bar shows the round, whose turn it is and who's next, with *Next turn* right there. Party cards light up for the active character and show everyone's initiative. Rolls from the dice tray show animated 3D dice and land as a result card. With **Dice Roller** installed, its dice are used instead.
+
+![Combat screen: combat bar with round and turn, party cards with initiative and "Their turn", a rumours table, a callout and the dice tray rolling 8d6](screenshots/combat.png)
+
+### Put just the part of a note you need
+Add a whole note, or pick one part of it like an Obsidian embed: a heading, a `^block` (paragraph, list item or a whole table), a callout, a statblock, a picture or a map. The tile follows the note, so edits show up straight away.
+
+![Picker for adding a part of the note Thornbridge: whole note, headings, a callout, ^blocks, a statblock and a picture](screenshots/note-parts-picker.png)
+
+![The Thornbridge screen: a callout, a ^cellar paragraph, the Places section, the ^rumours table, a sticky note and the town map](screenshots/note-parts.png)
+
+### Roll loot and hand it out
+Roll on the starter loot tables (or your own **Randomness** / Atlas VTT tables), then **Hand out…**: choose the party, decide who takes each item, and split the coins between the members you tick. Everything is written straight into the **One DnD Character Sheet** inventories.
+
+![Hand out loot: items assigned to the party inventory and to two characters, 1200 gp split evenly between four party members](screenshots/loot.png)
+
+*Screenshots use a made-up demo campaign; the characters, places and map are invented.*
+
 ---
 
 ## Features
