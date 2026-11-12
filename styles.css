@@ -261,6 +261,10 @@
 
 .gms-tile {
   position: absolute;
+  /* each tile is its own layer: nothing inside a tile underneath (note CSS,
+     map controls, the resize grip) can show through a tile on top of it */
+  z-index: 1;
+  isolation: isolate;
   display: flex;
   flex-direction: column;
   background: var(--background-secondary);
@@ -3167,4 +3171,28 @@ body.gms-narrow-note .gms-note-host .mobile-nav-menu-overlay .mobile-nav-menu-sh
   transform-origin: 0 0;
   user-select: none;
   pointer-events: none;
+}
+
+/* Several initiatives running together (Roll for Initiative 1.8) */
+.gms-combat-linked {
+  padding: 1px 8px;
+  border-radius: var(--radius-l);
+  background: rgba(var(--color-purple-rgb), 0.15);
+  color: var(--color-purple);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.gms-combat-linked:hover {
+  background: rgba(var(--color-purple-rgb), 0.25);
+}
+
+.gms-combat-from {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+}
+
+.gms-combat-from::before {
+  content: "· ";
 }

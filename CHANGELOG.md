@@ -2,12 +2,24 @@
 
 All notable changes to Game Master Interactive Screen. Newest first.
 
+## 1.0.0 – 2026-11-12
+### Added
+- **Several initiatives at once** (Roll for Initiative 1.8+). When fights are linked to run together, the combat bar treats them as one fight:
+  - **Next** is who really acts next across all of them, in the shared initiative order Roll for Initiative uses, with the fight's name when it's in the other one (e.g. *Next: Goblin · Cave*).
+  - **Turn** always shows the fight that has the turn, whichever fight changed last.
+  - A **"2 initiatives"** badge lists the fights; click one to open it.
+  - Party cards mark only the character whose turn it really is, and who's really on deck.
+### Fixed
+- A tile on top now fully covers the tiles under it. Before, parts of a note underneath (anything with its own layering in the note's CSS) could show through a map or another tile placed over it.
+### Notes
+- One fight, or an older Roll for Initiative: everything works as before.
+
 ## 0.15.0 – 2026-11-12
 ### Added
 - **Add just part of a note**, like Obsidian embeds. When you add a note (search **+**, **Add → Note…**, right-click a note → **Add to Game Master screen…**, or the *Add active note* command), a picker lets you choose:
   - 📄 the whole note,
   - **# a heading** and everything under it,
-  - **¶ a block** marked with `^id` (a paragraph, list item or whole table),
+  - **¶ a block** marked with `^id` (a paragraph, list item or whole table; a table shows its header row in the list),
   - **💬 a callout** (nested callouts listed indented),
   - **🐉 a statblock** (Fantasy Statblocks), by monster name,
   - **🖼 a picture** embedded in the note (opens in the zoom / pan viewer, or as a TTRPG map if it has markers),

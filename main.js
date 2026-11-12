@@ -621,6 +621,51 @@ function frontmatterEnd(lines) {
 }
 
 /**
+ * Several Roll for Initiative fights running together (RI 1.8 "linked"
+ * initiatives) as one fight: `states` are each fight's api.getState()
+ * results in list order, `turnRef` = { path, id } of the fight that has the
+ * turn. In the other fights the `current` marker only shows who acts next
+ * there, so it's cleared. Everyone who can act is put in one order
+ * (initiative, then fight order, then their order in the fight), the same
+ * order Roll for Initiative walks with Next turn; `next` is who follows the
+ * current combatant there. Returns null when fewer than two fights are running.
+ */
+function combineFights(states, turnRef, skipDown = true) {
+  const same = (st, r) => !!st && !!r && st.sourcePath === r.path && (st.id || "") === (r.id || "");
+  const run = (states || []).filter((x) => x && x.running && !x.ended);
+  if (run.length < 2) return null;
+  const turn = run.find((x) => same(x, turnRef)) || run.find((x) => !x.waiting) || run[0];
+  const canAct = (c) => !c.off && !(skipDown && !c.player && typeof c.hp === "number" && c.hp <= 0);
+  const all = [];
+  run.forEach((f, fi) => (f.combatants || []).forEach((c, ci) => {
+    all.push({ ...c, current: f === turn && !!c.current, fight: f.name || "", fightPath: f.sourcePath, fightId: f.id || null, fi, ci });
+  }));
+  const order = all.filter((c) => canAct(c) || c.current).sort((a, b) => {
+    const ia = a.init ?? -Infinity;
+    const ib = b.init ?? -Infinity;
+    return ia !== ib ? (ib > ia ? 1 : -1) : a.fi - b.fi || a.ci - b.ci;
+  });
+  const i = order.findIndex((c) => c.current);
+  let next = null;
+  for (let k = 1; k <= order.length; k++) {
+    const c = order[((i < 0 ? -1 : i) + k) % order.length];
+    if (c && !c.current) { next = c; break; }
+  }
+  const cur = all.find((c) => c.current);
+  return {
+    ...turn,
+    combatants: all,
+    current: cur ? cur.name : null,
+    currentFight: turn.name || "",
+    next: next ? next.name : null,
+    nextFight: next ? next.fight : null,
+    nextPath: next ? next.fightPath : null,
+    linked: true,
+    fights: run.map((f) => ({ name: f.name || "", sourcePath: f.sourcePath, id: f.id || null, turn: f === turn })),
+  };
+}
+
+/**
  * The pieces of a note you can put on the screen on their own, in order:
  * headings, blocks with a ^id, callouts, statblocks, pictures and maps.
  */
@@ -665,6 +710,12 @@ function noteParts(text) {
       const own = !line.replace(/\^[A-Za-z0-9-]+\s*$/, "").trim();
       let pv = own ? "" : line.replace(/\s*\^[A-Za-z0-9-]+\s*$/, "");
       if (own) for (let j = i - 1; j >= 0 && !pv; j--) pv = stripQuotes(lines[j], quoteDepth(lines[j])).trim();
+      if (own && /^\|/.test(pv)) {
+        // a table: show its header row, not the last row
+        let j = i - 1;
+        while (j > 0 && /^\|/.test(stripQuotes(lines[j - 1], quoteDepth(lines[j - 1])).trim())) j--;
+        pv = "Table: " + stripQuotes(lines[j], quoteDepth(lines[j])).trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim()).join(" · ");
+      }
       out.push({ kind: "block", id: b[1], preview: cleanHeading(pv.replace(/^\s*([-*+]|\d+\.)\s+/, "").replace(/^\|/, "")).slice(0, 60), line: i });
     }
     for (const m of line.matchAll(/!\[\[([^\]|#]+?\.(?:png|jpe?g|webp|gif|svg|avif|bmp))(?:[|#][^\]]*)?\]\]|!\[[^\]]*\]\(([^)\s]+?\.(?:png|jpe?g|webp|gif|svg|avif|bmp))\)/gi)) {
@@ -3223,7 +3274,16 @@ class GmScreenView extends ItemView {
     setIcon(ic, "swords");
     const name = bar.createEl("a", { cls: "gms-combat-name", text: st.name || "Combat" });
     name.onclick = () => this.openPopup({ type: "combat", path: st.sourcePath, blockId: st.id || undefined, title: st.name || "Combat" });
+    if (st.linked && st.fights && st.fights.length > 1) {
+      const n = bar.createSpan({ cls: "gms-combat-linked", text: `${st.fights.length} initiatives`, attr: { "aria-label": st.fights.map((f) => (f.turn ? `▶ ${f.name}` : f.name)).join("\n") } });
+      n.onclick = (e) => {
+        const m = new Menu();
+        for (const f of st.fights) m.addItem((it) => it.setTitle(f.turn ? `${f.name} (has the turn)` : f.name).setIcon(f.turn ? "play" : "swords").onClick(() => this.openPopup({ type: "combat", path: f.sourcePath, blockId: f.id || undefined, title: f.name || "Combat" })));
+        m.showAtMouseEvent(e);
+      };
+    }
     bar.createSpan({ cls: "gms-combat-round", text: `Round ${st.round || 1}` });
+    const other = (f) => !!(st.linked && f && f !== st.name);
     const turn = bar.createSpan({ cls: "gms-combat-turn" });
     turn.createSpan({ cls: "gms-combat-k", text: "Turn" });
     turn.createSpan({ cls: "gms-combat-v", text: st.current || "–" });
@@ -3231,6 +3291,7 @@ class GmScreenView extends ItemView {
       const nx = bar.createSpan({ cls: "gms-combat-next" });
       nx.createSpan({ cls: "gms-combat-k", text: "Next" });
       nx.createSpan({ cls: "gms-combat-v", text: st.next });
+      if (other(st.nextFight)) nx.createSpan({ cls: "gms-combat-from", text: st.nextFight });
     }
     bar.createDiv({ cls: "gms-spacer" });
     const btn = (icon, text, label, fn, cls = "") => {
@@ -5478,6 +5539,31 @@ class GmScreenPlugin extends Plugin {
     this.rollerHook = null;
   }
   onCombatChange(st) {
+    const seq = (this.combatSeq = (this.combatSeq || 0) + 1);
+    this.linkedState(st).then((all) => {
+      if (seq !== this.combatSeq) return; // a newer change came in meanwhile
+      this.setCombatState(all || st || null);
+    }, () => {
+      if (seq === this.combatSeq) this.setCombatState(st || null);
+    });
+  }
+  /** Roll for Initiative 1.8+: several initiatives running at once share one
+   *  turn order. Their fights, read through its API, as one combined state;
+   *  null when this fight isn't one of several. */
+  async linkedState(st) {
+    const p = this.app.plugins && this.app.plugins.plugins && this.app.plugins.plugins["roll-initiative"];
+    const ri = this.ri();
+    const L = p && p.settings && p.settings.linked;
+    if (!ri || !st || !st.sourcePath || !L || !Array.isArray(L.fights) || L.fights.length < 2) return null;
+    const mine = (r) => r && r.path === st.sourcePath && (r.id || "") === (st.id || "");
+    if (!L.fights.some(mine)) return null;
+    const states = await Promise.all(L.fights.map(async (r) => {
+      if (mine(r)) return st;
+      try { return await ri.getState(r.path, r.id || undefined); } catch (e) { return null; }
+    }));
+    return combineFights(states, L.turn, p.settings.skipDown !== false);
+  }
+  setCombatState(st) {
     this.combatState = st || null;
     this.views().forEach((v) => {
       v.renderCombatBar();
@@ -5491,7 +5577,7 @@ class GmScreenPlugin extends Plugin {
     const norm = (x) => String(x || "").replace(/\.md$/, "").split("/").pop().toLowerCase();
     const c = st.combatants.find((x) => (x.link && (x.link === file.path || norm(x.link) === norm(file.path))) || x.name === name || x.name === file.basename);
     if (!c) return null;
-    return { ...c, isNext: !!st.next && c.name === st.next };
+    return { ...c, isNext: !!st.next && c.name === st.next && (!st.nextPath || !c.fightPath || c.fightPath === st.nextPath) };
   }
   /** Add → Combat: Roll for Initiative's own wizard; pin what it makes. Our builder only without it. */
   async newCombat() {
@@ -7017,5 +7103,5 @@ module.exports = GmScreenPlugin;
 module.exports.__test = {
   norm, scoreEntry, computeSlots, stripLink, getPath, flattenValues, toInt, PRESETS,
   parseFormula, rollFormula, withAdvantage, critOf, breakdown, resultFromDiceRoller, visualDice, SHAPES, DiceStage,
-  PartyReader, ResponsiveNotes, rollContext, rollWhat, snapResize, screenToJson, screenFromJson, SoundBoard, SoundPadModal, padKind, padLoops, isAudio, noteParts, notePartMarkdown, NotePartPicker, markersCandidates, imageFromMarkers, imageMapMarkdown, spellEffectKind, noteTablesIn, tableIdUnderHeading, humanizeTable, promptPrefix, parseLoot, splitCoins, plainResult, slugParty, STARTER_TABLES, STARTER_FILES, LootHandoutModal, parseClocks, ckRemovePart, ckSetFill, ckSetValue, ckAdd, findClockBlocks, replaceClockBlock, parseDuration, hms, hm, insertNotes, spellcasting, findInitiativeBlock, combatBlock, extractSection, findMapBlocks, mapMarkdown, pickMap, cleanHeading, fillTokens, lastSessionNumber, padNum, cleanFileName, freeSpot, tileBox, isOpenTile, snapToTiles,
+  PartyReader, ResponsiveNotes, rollContext, rollWhat, snapResize, screenToJson, screenFromJson, SoundBoard, SoundPadModal, padKind, padLoops, isAudio, noteParts, notePartMarkdown, NotePartPicker, combineFights, markersCandidates, imageFromMarkers, imageMapMarkdown, spellEffectKind, noteTablesIn, tableIdUnderHeading, humanizeTable, promptPrefix, parseLoot, splitCoins, plainResult, slugParty, STARTER_TABLES, STARTER_FILES, LootHandoutModal, parseClocks, ckRemovePart, ckSetFill, ckSetValue, ckAdd, findClockBlocks, replaceClockBlock, parseDuration, hms, hm, insertNotes, spellcasting, findInitiativeBlock, combatBlock, extractSection, findMapBlocks, mapMarkdown, pickMap, cleanHeading, fillTokens, lastSessionNumber, padNum, cleanFileName, freeSpot, tileBox, isOpenTile, snapToTiles,
 };
