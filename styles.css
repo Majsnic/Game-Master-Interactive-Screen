@@ -3196,3 +3196,214 @@ body.gms-narrow-note .gms-note-host .mobile-nav-menu-overlay .mobile-nav-menu-sh
 .gms-combat-from::before {
   content: "· ";
 }
+
+/* ================= Editable tables (the "grid" tile) ================= */
+.gms-grid .gms-grid-wrap {
+  height: 100%;
+  overflow: auto;
+  padding: 6px;
+  box-sizing: border-box;
+}
+.gms-grid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-ui-small);
+}
+.gms-grid-table th,
+.gms-grid-table td {
+  border: 1px solid var(--background-modifier-border);
+  padding: 0;
+  vertical-align: middle;
+}
+.gms-grid-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--background-secondary);
+}
+.gms-grid-table .gms-grid-in,
+.gms-grid-table .gms-grid-head {
+  width: 100%;
+  min-width: 56px;
+  height: auto;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 4px 6px;
+  color: var(--text-normal);
+  font: inherit;
+}
+.gms-grid-table .gms-grid-head {
+  font-weight: 600;
+  padding-right: 22px;
+}
+.gms-grid-table .gms-grid-in:focus,
+.gms-grid-table .gms-grid-head:focus {
+  background: var(--background-modifier-hover);
+  box-shadow: inset 0 0 0 1px var(--interactive-accent);
+}
+.gms-grid-colbtn {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.gms-grid-colbtn:hover { color: var(--text-normal); }
+.gms-grid-colbtn svg { width: 14px; height: 14px; }
+.gms-grid-corner { width: 26px; min-width: 26px; }
+.gms-grid-corner .gms-grid-colbtn {
+  position: static;
+  transform: none;
+  margin: 0 auto;
+}
+.gms-grid-checkcell { text-align: center; }
+.gms-grid-box {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--text-faint);
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+}
+.gms-grid-box.is-on {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.gms-grid-box svg { width: 13px; height: 13px; }
+.gms-grid-num { display: flex; align-items: center; }
+.gms-grid-table .gms-grid-in.is-num { text-align: center; min-width: 34px; }
+.gms-grid-step {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-ui-medium);
+  line-height: 1;
+}
+.gms-grid-step:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+.gms-grid-delcell { width: 24px; min-width: 24px; text-align: center; border-style: none; }
+.gms-grid-del {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.gms-grid-table tr:hover .gms-grid-del,
+.gms-grid-del:focus-visible { opacity: 1; }
+.gms-grid-del:hover { color: var(--text-error); }
+.gms-grid-del svg { width: 14px; height: 14px; }
+.gms-grid-table tfoot td {
+  background: var(--background-secondary);
+  font-weight: 600;
+  text-align: center;
+  padding: 4px 6px;
+}
+.gms-grid-add {
+  margin-top: 6px;
+  width: 100%;
+  border: 1px dashed var(--background-modifier-border);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+}
+.gms-grid-add:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+.gms-grid-table textarea.gms-grid-text {
+  display: block;
+  resize: none;
+  overflow: hidden;
+  min-width: 90px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.gms-grid-table td:has(> textarea) { vertical-align: top; }
+.gms-grid-num { min-width: 84px; }
+.gms-grid-checkcell { min-width: 34px; }
+
+/* column resizing */
+.gms-grid-table .gms-grid-head { padding-right: 26px; }
+.gms-grid-table th .gms-grid-colbtn { right: 8px; }
+.gms-grid-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -3px;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 2;
+  touch-action: none;
+}
+.gms-grid-resize:hover,
+.gms-grid-resize:active { background: var(--interactive-accent); opacity: 0.55; }
+.gms-grid-corner,
+.gms-grid-delcell { width: 26px; min-width: 26px; }
+.gms-grid-table.is-fixed { table-layout: fixed; }
+.gms-grid-table.is-fixed .gms-grid-in,
+.gms-grid-table.is-fixed .gms-grid-head,
+.gms-grid-table.is-fixed .gms-grid-num,
+.gms-grid-table.is-fixed textarea.gms-grid-text { min-width: 0; }
+
+/* number cells: keep the - and + buttons off the cell borders */
+.gms-grid-num {
+  gap: 3px;
+  padding: 3px 5px;
+  min-width: 96px;
+}
+.gms-grid-step { border-radius: var(--radius-s); }
+
+/* number cells: double the spacing */
+.gms-grid-num {
+  gap: 6px;
+  padding: 6px 10px;
+  min-width: 112px;
+}
+
+/* the tile is as wide as its table; the tile body scrolls, not the table wrapper */
+.gms-grid .gms-grid-wrap { height: auto; overflow: visible; }
+.gms-grid-table { table-layout: fixed; }
+.gms-grid-table textarea.gms-grid-head {
+  display: block;
+  resize: none;
+  overflow: hidden;
+  line-height: 1.3;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  padding: 4px 26px 4px 6px;
+}
+.gms-tile-grid .gms-tile-resize { cursor: ns-resize; }

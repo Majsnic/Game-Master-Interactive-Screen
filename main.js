@@ -584,13 +584,14 @@ const TILE_SIZES = {
   dice: { w: 420, h: 400 },
   sticky: { w: 240, h: 230 },
   checklist: { w: 270, h: 320 },
+  grid: { w: 420, h: 340 },
   sound: { w: 360, h: 300 },
   clocks: { w: 400, h: 480 },
   tables: { w: 460, h: 520 },
   diary: { w: 440, h: 440 },
 };
-const TILE_ICONS = { note: "file-text", section: "heading", part: "text-select", map: "map", party: "users", diary: "notebook-pen", combat: "swords", dice: "dices", sticky: "sticky-note", checklist: "list-checks", sound: "audio-lines", clocks: "hourglass", tables: "dices" };
-const ALWAYS_OPEN = ["party", "diary", "combat", "dice", "sticky", "checklist", "sound", "clocks", "tables"];
+const TILE_ICONS = { note: "file-text", section: "heading", part: "text-select", map: "map", party: "users", diary: "notebook-pen", combat: "swords", dice: "dices", sticky: "sticky-note", checklist: "list-checks", sound: "audio-lines", clocks: "hourglass", tables: "dices", grid: "table" };
+const ALWAYS_OPEN = ["party", "diary", "combat", "dice", "sticky", "checklist", "sound", "clocks", "tables", "grid"];
 const STICKY_COLORS = { yellow: "Yellow", pink: "Pink", blue: "Blue", green: "Green", orange: "Orange" };
 const STICKY_SIZES = { s: ["Small", 0.8], m: ["Medium", 1], l: ["Large", 1.3], xl: ["Extra large", 1.7] }; // shown open unless shrunk
 
@@ -1926,6 +1927,88 @@ class TextAreaPrompt extends Modal {
     setTimeout(() => ta.focus(), 0);
   }
   onClose() { this.contentEl.empty(); }
+}
+
+/* ================= Editable tables (the "grid" tile) ================= */
+
+/** A fresh table: a text column, a checkbox column and three empty rows. */
+function newGridSpec() {
+  return { cols: [{ id: uid(), name: "Name", type: "text" }, { id: uid(), name: "Done", type: "check" }], rows: [0, 1, 2].map(() => ({ id: uid(), c: {} })) };
+}
+
+/** Change a cell value when its column changes type. */
+function gridConvert(v, from, to) {
+  if (from === to) return v;
+  if (to === "number") {
+    const raw = v === true ? "1" : v === false || v == null ? "" : String(v);
+    const n = parseFloat(raw.replace(",", "."));
+    return isNaN(n) ? 0 : n;
+  }
+  if (to === "check") return v === true || (typeof v === "number" && v > 0) || /^(x|yes|true|1|☑|✓|done)$/i.test(String(v == null ? "" : v).trim());
+  if (v === true) return "yes";
+  if (v === false || v == null) return "";
+  return String(v);
+}
+
+/** The cells of one markdown table row ("\|" is a literal bar). */
+function mdCells(line) {
+  let s = String(line).trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+  const out = [];
+  let cur = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === "\\" && s[i + 1] === "|") { cur += "|"; i++; }
+    else if (ch === "|") { out.push(cur.trim()); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+/** A table tile as a normal markdown table (☐ / ☑ for checkboxes). */
+function gridToMarkdown(t) {
+  const esc = (x) => String(x == null ? "" : x).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  const cols = t.cols || [];
+  const head = "| " + cols.map((c) => esc(c.name) || " ").join(" | ") + " |";
+  const sep = "| " + cols.map((c) => (c.type === "number" ? "---:" : "---")).join(" | ") + " |";
+  const rows = (t.rows || []).map((r) => "| " + cols.map((c) => {
+    const v = r.c ? r.c[c.id] : undefined;
+    if (c.type === "check") return v ? "☑" : "☐";
+    if (c.type === "number") return v === undefined || v === "" ? "0" : String(v);
+    return esc(v) || " ";
+  }).join(" | ") + " |");
+  return [head, sep, ...rows].join("\n");
+}
+
+/** Read a markdown table into { cols, rows }, working out each column's type; null if it isn't a table. */
+function markdownToGrid(md) {
+  const lines = String(md || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("|"));
+  if (lines.length < 2) return null;
+  const head = mdCells(lines[0]);
+  const sep = mdCells(lines[1]);
+  if (!head.length || !sep.every((x) => /^:?-+:?$/.test(x))) return null;
+  const body = lines.slice(2).map(mdCells).filter((r) => r.some((x) => x !== ""));
+  const CHK = /^(☐|☑|☒|\[ ?\]|\[x\])$/i;
+  const cols = head.map((name, i) => {
+    const vals = body.map((r) => (r[i] === undefined ? "" : r[i])).filter((x) => x !== "");
+    let type = "text";
+    if (vals.length && vals.every((x) => CHK.test(x))) type = "check";
+    else if (vals.length ? vals.every((x) => /^-?\d+([.,]\d+)?$/.test(x)) : /^-+:$/.test(sep[i] || "")) type = "number";
+    return { id: uid(), name, type };
+  });
+  const rows = body.map((r) => {
+    const c = {};
+    cols.forEach((col, i) => {
+      const x = r[i] === undefined ? "" : r[i];
+      if (col.type === "check") c[col.id] = /^(☑|☒|\[x\])$/i.test(x);
+      else if (col.type === "number") c[col.id] = x === "" ? 0 : parseFloat(x.replace(",", "."));
+      else c[col.id] = x;
+    });
+    return { id: uid(), c };
+  });
+  return { cols, rows };
 }
 
 /** "What do you want from this note?" – the whole note or one part of it. */
@@ -3459,6 +3542,7 @@ class GmScreenView extends ItemView {
     m.addItem((it) => it.setTitle("Map…").setIcon("map").onClick(() => this.plugin.pickMapImage()));
     m.addItem((it) => it.setTitle("Sticky note").setIcon(TILE_ICONS.sticky).onClick(() => this.plugin.addTile({ type: "sticky" })));
     m.addItem((it) => it.setTitle("Checklist").setIcon(TILE_ICONS.checklist).onClick(() => this.plugin.addTile({ type: "checklist", items: [] })));
+    m.addItem((it) => it.setTitle("Table (editable)").setIcon(TILE_ICONS.grid).onClick(() => this.plugin.addTile({ type: "grid", ...newGridSpec() })));
     m.addItem((it) => it.setTitle("Soundboard").setIcon(TILE_ICONS.sound).onClick(() => this.plugin.addTile({ type: "sound", pads: [] })));
     m.addItem((it) => it.setTitle("Clocks & timers").setIcon(TILE_ICONS.clocks).onClick(() => this.plugin.addTile({ type: "clocks", clocks: "" })));
     m.addItem((it) => it.setTitle("Random tables").setIcon("table-2").onClick(() => this.plugin.addTile({ type: "tables", tables: this.plugin.starterInstalled() ? clone(STARTER_TABLES) : [], history: [] })));
@@ -3940,7 +4024,7 @@ class GmScreenView extends ItemView {
     });
   }
 
-  resizeHandle(handle, target, onDone, minW, minH, widthOnly, snapper) {
+  resizeHandle(handle, target, onDone, minW, minH, widthOnly, snapper, lockWidth) {
     handle.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
@@ -3953,14 +4037,14 @@ class GmScreenView extends ItemView {
       target.addClass("is-resizing");
       let snapped = null;
       const move = (ev) => {
-        let w = Math.max(minW, ow + ev.clientX - sx);
+        let w = lockWidth ? ow : Math.max(minW, ow + ev.clientX - sx);
         let h = widthOnly ? oh : Math.max(minH, oh + ev.clientY - sy);
         snapped = null;
         if (snapper) {
           const sn = snapper(w, h);
           if (sn.snapped) {
             snapped = sn;
-            w = Math.max(minW, sn.w);
+            w = lockWidth ? ow : Math.max(minW, sn.w);
             if (!widthOnly) h = Math.max(minH, sn.h);
           }
         }
@@ -3974,7 +4058,7 @@ class GmScreenView extends ItemView {
         win.removeEventListener("pointercancel", up, true);
         target.removeClass("is-resizing");
         target.removeClass("is-snapped");
-        const w = snapped ? Math.round(target.offsetWidth) : snap(target.offsetWidth);
+        const w = lockWidth || snapped ? Math.round(target.offsetWidth) : snap(target.offsetWidth);
         const h = snapped ? Math.round(target.offsetHeight) : snap(target.offsetHeight);
         target.style.width = `${w}px`;
         if (!widthOnly) target.style.height = `${h}px`;
@@ -4019,8 +4103,8 @@ class GmScreenView extends ItemView {
       w = Math.max(w, b.x + b.w);
       h = Math.max(h, b.y + b.h);
     }
-    this.board.style.width = `${w + 200}px`;
-    this.board.style.height = `${h + 200}px`;
+    this.board.style.width = `${w + 20}px`;
+    this.board.style.height = `${h + 20}px`;
   }
 
   isOpenTile(t) {
@@ -4048,6 +4132,7 @@ class GmScreenView extends ItemView {
     if (t.type === "combat") return "Combat";
     if (t.type === "dice") return "Dice tray";
     if (t.type === "checklist") return "Checklist";
+    if (t.type === "grid") return "Table";
     if (t.type === "sound") return t.title || "Soundboard";
     if (t.type === "tables") return t.title || "Random tables";
     if (t.type === "clocks") return t.title || (t.path ? `Clocks – ${t.path.split("/").pop().replace(/\.md$/, "")}` : "Clocks & timers");
@@ -4124,7 +4209,7 @@ class GmScreenView extends ItemView {
       this.resizeHandle(grip, el, (w, h) => this.plugin.updateTile(t, open ? { w, h } : { cw: w }), 120, 80, !open, (w, h) => {
         const others = this.screen.tiles.filter((o) => o !== t).map(tileBox);
         return snapResize({ x: box.x, y: box.y, w, h }, others);
-      });
+      }, open && t.type === "grid");
     };
 
     if (!open) return addGrip();
@@ -4135,6 +4220,7 @@ class GmScreenView extends ItemView {
     else if (t.type === "dice") this.renderDiceTray(body, t);
     else if (t.type === "sticky") this.renderSticky(body, t, title);
     else if (t.type === "checklist") this.renderChecklist(body, t);
+    else if (t.type === "grid") this.renderGrid(body, t);
     else if (t.type === "sound") this.renderSound(body, t);
     else if (t.type === "clocks") this.renderClocks(body, t);
     else if (t.type === "tables") this.renderTables(body, t);
@@ -4203,6 +4289,28 @@ class GmScreenView extends ItemView {
       m.addItem((it) => it.setTitle("Remove ticked items").setIcon("list-x").onClick(() => {
         this.plugin.updateTile(t, { items: (t.items || []).filter((x) => !x.done) }, true);
       }));
+      m.addSeparator();
+    }
+    if (t.type === "grid") {
+      m.addItem((it) => it.setTitle("Add row").setIcon("plus").onClick(() => { (t.rows = t.rows || []).push({ id: uid(), c: {} }); this.plugin.updateTile(t, {}, true); }));
+      m.addItem((it) => it.setTitle("Add text column").setIcon("text").onClick(() => this.gridAddCol(t, "text")));
+      m.addItem((it) => it.setTitle("Add number column").setIcon("hash").onClick(() => this.gridAddCol(t, "number")));
+      m.addItem((it) => it.setTitle("Add checkbox column").setIcon("check-square").onClick(() => this.gridAddCol(t, "check")));
+      m.addItem((it) => it.setTitle(t.totals ? "Hide totals" : "Show totals").setIcon("sigma").onClick(() => this.plugin.updateTile(t, { totals: !t.totals }, true)));
+      m.addItem((it) => it.setTitle("Edit as markdown…").setIcon("pencil").onClick(() => new TextAreaPrompt(this.app, "Table", gridToMarkdown(t), (v) => {
+        const g = markdownToGrid(v);
+        if (!g) return new Notice("Couldn't read that as a markdown table (it needs a header row and a | --- | separator row).");
+        this.plugin.updateTile(t, { cols: g.cols, rows: g.rows }, true);
+      }, "A normal markdown table. ☐ / ☑ make checkbox columns and plain numbers make counter columns. Paste a table from a note to load it.").open()));
+      m.addItem((it) => it.setTitle("Copy as markdown").setIcon("copy").onClick(async () => {
+        try { await navigator.clipboard.writeText(gridToMarkdown(t)); new Notice("Table copied as markdown"); } catch (e) { new Notice("Couldn't copy: " + (e.message || e)); }
+      }));
+      m.addItem((it) => it.setTitle("Untick all and reset numbers to 0").setIcon("rotate-ccw").onClick(() => {
+        (t.rows || []).forEach((r) => { for (const c of t.cols || []) if (c.type === "check") (r.c = r.c || {})[c.id] = false; else if (c.type === "number") (r.c = r.c || {})[c.id] = 0; });
+        this.plugin.updateTile(t, {}, true);
+      }));
+      m.addItem((it) => it.setTitle("Reset column widths").setIcon("move-horizontal").onClick(() => { (t.cols || []).forEach((c) => { delete c.w; }); this.plugin.updateTile(t, {}, true); }));
+      m.addItem((it) => it.setTitle("Clear all rows").setIcon("eraser").onClick(() => this.plugin.updateTile(t, { rows: [] }, true)));
       m.addSeparator();
     }
     if (t.type === "sticky") {
@@ -4440,6 +4548,249 @@ class GmScreenView extends ItemView {
       draw();
       list.scrollTop = list.scrollHeight;
     });
+    draw();
+  }
+
+  /* ---------------- Editable tables ---------------- */
+  gridAddCol(t, type) {
+    t.cols = t.cols || [];
+    t.cols.push({ id: uid(), name: type === "number" ? "Count" : type === "check" ? "Done" : "Column", type });
+    this.plugin.updateTile(t, {}, true);
+  }
+
+  renderGrid(body, t) {
+    body.addClass("gms-grid");
+    if (!Array.isArray(t.cols) || !t.cols.length) t.cols = newGridSpec().cols;
+    if (!Array.isArray(t.rows)) t.rows = [];
+    const save = () => this.plugin.saveSoon();
+    const wrap = body.createDiv({ cls: "gms-grid-wrap" });
+    const isolate = (el) => {
+      el.addEventListener("pointerdown", (e) => e.stopPropagation());
+      el.addEventListener("keydown", (e) => e.stopPropagation());
+    };
+    const val = (r, c) => (r.c ? r.c[c.id] : undefined);
+    const setVal = (r, c, v) => { if (!r.c) r.c = {}; r.c[c.id] = v; save(); };
+    const focusCell = (ri, ci) => {
+      const el = wrap.querySelector(`[data-r="${ri}"][data-c="${ci}"]`);
+      if (el) { el.focus(); if (el.select) el.select(); }
+    };
+    const table = wrap.createEl("table", { cls: "gms-grid-table is-fixed" });
+    const thead = table.createEl("thead");
+    const tbody = table.createEl("tbody");
+    const tfoot = table.createEl("tfoot");
+    const addBtn = wrap.createEl("button", { cls: "gms-grid-add", text: "+ Add row" });
+    isolate(addBtn);
+
+    const fitAll = () => wrap.querySelectorAll("textarea.gms-grid-text, textarea.gms-grid-head").forEach((el) => {
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight}px`;
+    });
+
+    /** The narrowest a column may be: its longest header word has to fit on one line. */
+    const headMin = (name) => {
+      const cs = getComputedStyle(document.body);
+      const size = parseFloat(cs.getPropertyValue("--font-ui-small")) || 13;
+      if (!this.gridCanvas) this.gridCanvas = document.createElement("canvas");
+      const ctx = this.gridCanvas.getContext("2d");
+      ctx.font = `600 ${size}px ${cs.fontFamily}`;
+      const longest = String(name || "").split(/\s+/).reduce((a, b) => (b.length > a.length ? b : a), "");
+      return Math.ceil(ctx.measureText(longest || "Column").width) + 38;
+    };
+    const minWidth = (col) => Math.max(headMin(col.name), col.type === "number" ? 112 : col.type === "check" ? 44 : 60);
+    /** Every column has its own width (px): a start width for new columns, never below the minimum. */
+    const ensureWidths = () => {
+      t.cols.forEach((col) => {
+        if (!col.w) {
+          if (col.type === "check") col.w = 64;
+          else if (col.type === "number") col.w = 120;
+          else {
+            const longest = Math.min(40, Math.max(0, ...t.rows.map((r) => String(val(r, col) || "").length)));
+            col.w = Math.round(Math.min(260, Math.max(130, 24 + 7.2 * longest)));
+          }
+        }
+        col.w = Math.max(col.w, minWidth(col));
+      });
+    };
+    const applyWidths = () => { table.style.width = `${t.cols.reduce((sum, c) => sum + (c.w || 120), 0) + 52}px`; };
+    /** The tile is exactly as wide as its table, so stretching a column stretches the tile. */
+    const syncTile = () => {
+      const el = body.closest(".gms-tile");
+      if (!el || !body.clientWidth) return;
+      const bs = getComputedStyle(body);
+      const ws = getComputedStyle(wrap);
+      const pad = (parseFloat(bs.paddingLeft) || 0) + (parseFloat(bs.paddingRight) || 0) + (parseFloat(ws.paddingLeft) || 0) + (parseFloat(ws.paddingRight) || 0);
+      const chrome = el.offsetWidth - (body.clientWidth - pad);
+      const want = Math.max(200, Math.round(table.offsetWidth + chrome));
+      if (t.w === want && Math.abs(el.offsetWidth - want) < 1) return;
+      el.style.width = `${want}px`;
+      t.w = want;
+      save();
+      this.sizeBoard();
+    };
+
+    const addRow = () => { t.rows.push({ id: uid(), c: {} }); save(); draw(); };
+
+    const drawFoot = () => {
+      tfoot.empty();
+      if (!t.totals) return;
+      const tr = tfoot.createEl("tr");
+      t.cols.forEach((col, ci) => {
+        let txt = "";
+        if (col.type === "number") txt = String(Math.round(t.rows.reduce((sum, r) => sum + (Number(val(r, col)) || 0), 0) * 1e6) / 1e6);
+        else if (col.type === "check") txt = `${t.rows.filter((r) => val(r, col)).length} / ${t.rows.length}`;
+        else if (ci === 0) txt = "Total";
+        tr.createEl("td", { text: txt });
+      });
+      tr.createEl("td");
+    };
+
+    const colMenu = (col, i, ev) => {
+      const m = new Menu();
+      for (const [k, label, icon] of [["text", "Text", "text"], ["number", "Number (with + and −)", "hash"], ["check", "Checkbox", "check-square"]]) {
+        m.addItem((it) => it.setTitle(`${col.type === k ? "● " : ""}${label}`).setIcon(icon).onClick(() => {
+          if (col.type === k) return;
+          t.rows.forEach((r) => { if (r.c && r.c[col.id] !== undefined) r.c[col.id] = gridConvert(r.c[col.id], col.type, k); });
+          col.type = k;
+          save();
+          draw();
+        }));
+      }
+      m.addSeparator();
+      if (i > 0) m.addItem((it) => it.setTitle("Move left").setIcon("arrow-left").onClick(() => { t.cols.splice(i - 1, 0, t.cols.splice(i, 1)[0]); save(); draw(); }));
+      if (i < t.cols.length - 1) m.addItem((it) => it.setTitle("Move right").setIcon("arrow-right").onClick(() => { t.cols.splice(i + 1, 0, t.cols.splice(i, 1)[0]); save(); draw(); }));
+      if (t.cols.length > 1) m.addItem((it) => it.setTitle("Delete column").setIcon("trash").onClick(() => {
+        t.cols.splice(i, 1);
+        t.rows.forEach((r) => { if (r.c) delete r.c[col.id]; });
+        save();
+        draw();
+      }));
+      m.showAtMouseEvent(ev);
+    };
+
+    const draw = () => {
+      ensureWidths();
+      applyWidths();
+      thead.empty();
+      tbody.empty();
+      const hr = thead.createEl("tr");
+      t.cols.forEach((col, ci) => {
+        const th = hr.createEl("th");
+        th.style.width = `${col.w}px`;
+        const hi = th.createEl("textarea", { cls: "gms-grid-head", attr: { rows: "1", placeholder: "Column", "aria-label": "Column name" } });
+        hi.value = col.name || "";
+        isolate(hi);
+        hi.addEventListener("input", () => {
+          if (/\n/.test(hi.value)) hi.value = hi.value.replace(/\r?\n/g, " ");
+          col.name = hi.value;
+          save();
+          const min = minWidth(col);
+          if (col.w < min) { col.w = min; th.style.width = `${min}px`; applyWidths(); syncTile(); }
+          fitAll();
+        });
+        hi.addEventListener("keydown", (e) => {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          focusCell(0, ci);
+        });
+        const mb = th.createEl("button", { cls: "gms-grid-colbtn", attr: { "aria-label": "Column options" } });
+        setIcon(mb, "chevron-down");
+        isolate(mb);
+        mb.onclick = (ev) => colMenu(col, ci, ev);
+        const grip = th.createDiv({ cls: "gms-grid-resize", attr: { "aria-label": "Drag to resize this column" } });
+        grip.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const startX = e.clientX;
+          const startW = col.w;
+          grip.setPointerCapture(e.pointerId);
+          const move = (ev) => {
+            col.w = Math.max(minWidth(col), Math.round(startW + ev.clientX - startX));
+            th.style.width = `${col.w}px`;
+            applyWidths();
+            fitAll();
+            syncTile();
+          };
+          const up = () => {
+            grip.removeEventListener("pointermove", move);
+            grip.removeEventListener("pointerup", up);
+            grip.removeEventListener("pointercancel", up);
+            save();
+          };
+          grip.addEventListener("pointermove", move);
+          grip.addEventListener("pointerup", up);
+          grip.addEventListener("pointercancel", up);
+        });
+      });
+      const corner = hr.createEl("th", { cls: "gms-grid-corner" });
+      corner.style.width = "26px";
+      const plus = corner.createEl("button", { cls: "gms-grid-colbtn", attr: { "aria-label": "Add a column" } });
+      setIcon(plus, "plus");
+      isolate(plus);
+      plus.onclick = (ev) => {
+        const m = new Menu();
+        m.addItem((it) => it.setTitle("Text column").setIcon("text").onClick(() => { t.cols.push({ id: uid(), name: "Column", type: "text" }); save(); draw(); }));
+        m.addItem((it) => it.setTitle("Number column").setIcon("hash").onClick(() => { t.cols.push({ id: uid(), name: "Count", type: "number" }); save(); draw(); }));
+        m.addItem((it) => it.setTitle("Checkbox column").setIcon("check-square").onClick(() => { t.cols.push({ id: uid(), name: "Done", type: "check" }); save(); draw(); }));
+        m.showAtMouseEvent(ev);
+      };
+
+      t.rows.forEach((r, ri) => {
+        const tr = tbody.createEl("tr");
+        t.cols.forEach((col, ci) => {
+          const td = tr.createEl("td");
+          const v = val(r, col);
+          if (col.type === "check") {
+            const on = !!v;
+            td.addClass("gms-grid-checkcell");
+            const b = td.createEl("button", { cls: "gms-grid-box", attr: { role: "checkbox", "aria-checked": on ? "true" : "false", "aria-label": on ? "Untick" : "Tick" } });
+            b.toggleClass("is-on", on);
+            if (on) setIcon(b, "check");
+            isolate(b);
+            b.onclick = () => { setVal(r, col, !on); draw(); };
+          } else if (col.type === "number") {
+            const box = td.createDiv({ cls: "gms-grid-num" });
+            const minus = box.createEl("button", { cls: "gms-grid-step", text: "−", attr: { "aria-label": "Minus one" } });
+            const inp = box.createEl("input", { type: "text", cls: "gms-grid-in is-num", value: String(Number(v) || 0), attr: { inputmode: "decimal", "data-r": String(ri), "data-c": String(ci) } });
+            const more = box.createEl("button", { cls: "gms-grid-step", text: "+", attr: { "aria-label": "Plus one" } });
+            isolate(minus); isolate(inp); isolate(more);
+            const commit = (n) => { n = Math.round(n * 1e6) / 1e6; setVal(r, col, n); inp.value = String(n); drawFoot(); };
+            minus.onclick = () => commit((Number(val(r, col)) || 0) - 1);
+            more.onclick = () => commit((Number(val(r, col)) || 0) + 1);
+            inp.addEventListener("change", () => { const n = parseFloat(String(inp.value).replace(",", ".")); commit(isNaN(n) ? 0 : n); });
+            inp.addEventListener("keydown", (e) => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              inp.blur();
+              if (ri === t.rows.length - 1) addRow();
+              focusCell(ri + 1, ci);
+            });
+          } else {
+            const inp = td.createEl("textarea", { cls: "gms-grid-in gms-grid-text", attr: { rows: "1", "data-r": String(ri), "data-c": String(ci) } });
+            inp.value = v == null ? "" : String(v);
+            isolate(inp);
+            inp.addEventListener("input", () => {
+              setVal(r, col, inp.value);
+              inp.style.height = "auto";
+              inp.style.height = `${inp.scrollHeight}px`;
+            });
+            inp.addEventListener("keydown", (e) => {
+              if (e.key !== "Enter" || e.shiftKey) return;
+              e.preventDefault();
+              if (ri === t.rows.length - 1) addRow();
+              focusCell(ri + 1, ci);
+            });
+          }
+        });
+        const dtd = tr.createEl("td", { cls: "gms-grid-delcell" });
+        const x = dtd.createEl("button", { cls: "gms-grid-del", attr: { "aria-label": "Remove row" } });
+        setIcon(x, "x");
+        isolate(x);
+        x.onclick = () => { t.rows.splice(ri, 1); save(); draw(); };
+      });
+      drawFoot();
+      requestAnimationFrame(() => { fitAll(); syncTile(); });
+    };
+    addBtn.onclick = () => addRow();
     draw();
   }
 
@@ -6494,7 +6845,7 @@ class GmScreenPlugin extends Plugin {
     const view = this.views()[0];
     const width = (view && view.boardWrap && view.boardWrap.clientWidth) || 1000;
     const tile = { id: uid(), x: 0, y: 0, w: size.ew || size.w, h: size.h, cw: Math.min(size.w, 240), expanded: false };
-    for (const k of ["type", "path", "heading", "level", "mapIndex", "mapId", "mapLine", "blockId", "title", "text", "color", "items", "pads", "clocks", "clockBlock", "tables", "history", "image", "markers", "expanded", "partKind", "ref", "index"]) if (spec[k] !== undefined) tile[k] = spec[k];
+    for (const k of ["type", "path", "heading", "level", "mapIndex", "mapId", "mapLine", "blockId", "title", "text", "color", "items", "pads", "clocks", "clockBlock", "tables", "cols", "rows", "totals", "history", "image", "markers", "expanded", "partKind", "ref", "index"]) if (spec[k] !== undefined) tile[k] = spec[k];
     const box = tileBox(tile);
     Object.assign(tile, freeSpot(sc.tiles, box.w, box.h, width));
     sc.tiles.push(tile);
